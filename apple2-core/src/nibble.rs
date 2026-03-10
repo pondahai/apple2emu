@@ -44,6 +44,12 @@ impl TrackData {
 pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
     let mut tracks = alloc::vec::Vec::with_capacity(35);
 
+    // DOS 3.3 physical sector interleave table
+    // physical_position -> logical sector number in the .dsk file
+    // e.g. the first sector on the track (physical 0) holds logical sector 0,
+    //      the second sector on the track (physical 1) holds logical sector 7, etc.
+    const PHYS_TO_LOGICAL: [usize; 16] = [0, 7, 14, 6, 13, 5, 12, 4, 11, 3, 10, 2, 9, 1, 8, 15];
+
     for track_num in 0..35 {
         let mut track_out = TrackData::new();
         let track_offset = track_num * 16 * 256;
@@ -51,8 +57,9 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
         // Gap 1 (Lead-in)
         for _ in 0..48 { track_out.push(0xFF); }
 
-        for sector in 0..16 {
-            let sector_offset = track_offset + (sector * 256);
+        for phys_pos in 0..16 {
+            let logical_sector = PHYS_TO_LOGICAL[phys_pos];
+            let sector_offset = track_offset + (logical_sector * 256);
             let sector_data = &disk_data[sector_offset .. sector_offset + 256];
 
             // Address Field
@@ -62,9 +69,10 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
             track_out.push(0x96);
 
             // Volume (default 254), Track, Sector, Checksum
+            // The address field sector number is the LOGICAL sector number
             let vol = 254_u8;
             let trk = track_num as u8;
-            let sec = sector as u8;
+            let sec = logical_sector as u8;
             let chk = vol ^ trk ^ sec;
 
             // 4x4 encoding for address fields
@@ -108,9 +116,9 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
             }
             
             // Secondary buffer: bottom 2 bits, packed 3 per byte
-            // The standard algorithm processes data bytes 255 down to 0,
-            // extracting 2 bits at a time with shifts
-            for i in (0..256).rev() {
+            // The standard algorithm processes data bytes 0 up to 255,
+            // shifting the previous bits left by 2 so that larger indices end up at the bottom
+            for i in 0..256 {
                 let val = sector_data[i];
                 // Extract bottom 2 bits, bit-reversed (matches hardware LSR/ROL order)
                 let two_bits = ((val & 0x01) << 1) | ((val & 0x02) >> 1);

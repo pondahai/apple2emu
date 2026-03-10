@@ -28,6 +28,9 @@ pub struct Disk2 {
 
     // Timing
     pub cycles_since_last_byte: u32,
+    pub data_latch: u8,
+    pub latch_valid: bool,
+    pub latch_valid_cycles: i32, // Cycles remaining where the current latch bit 7 is set
 }
 
 impl Disk2 {
@@ -51,6 +54,9 @@ impl Disk2 {
             phases: [false; 4],
             phase_index: 0,
             cycles_since_last_byte: 0,
+            data_latch: 0,
+            latch_valid: false,
+            latch_valid_cycles: 0,
         }
     }
 
@@ -70,26 +76,22 @@ impl Disk2 {
     pub fn read_io(&mut self, addr: u16) -> u8 {
         self.handle_io(addr);
         
-        // When reading from the Q6 locus ($C0EC), we return the currently latched byte from the disk.
-        // If the motor is off, behavior is undefined/floating. We return 0x00 for now.
-        if self.motor_on {
-            if addr == 0xC0EC {
-                if !self.is_disk_loaded { return 0x00; }
-                
-                let track = &self.tracks[self.current_track];
-                if track.length == 0 { return 0x00; }
+        // When reading from the data register ($C0EC), return the current disk byte
+        if self.motor_on && addr == 0xC0EC {
+            if !self.is_disk_loaded { return 0x00; }
+            
+            let track_len = self.tracks[self.current_track].length;
+            if track_len == 0 { return 0x00; }
 
-                // Return the next byte ONLY if enough cycles (32) have passed (simulating ~300 RPM)
-                if self.cycles_since_last_byte >= 32 {
-                    self.cycles_since_last_byte = 0;
-                    let val = track.raw_bytes[self.byte_index];
-                    self.byte_index = (self.byte_index + 1) % track.length;
-                    return val;
-                } else {
-                    // Not ready yet. Return the current byte but with bit 7 CLEAR
-                    // The Apple II RWTS loop (BD 8C C0 10 FB) waits for bit 7 to be SET.
-                    return track.raw_bytes[self.byte_index] & 0x7F;
-                }
+            // Return the latched byte. 
+            // In Disk II hardware, bit 7 is set when a full nibble is shifted in. 
+            // We clear our valid window immediately on read so the CPU doesn't see 
+            // the same byte twice and get confused expecting the *next* byte.
+            if self.latch_valid_cycles > 0 {
+                self.latch_valid_cycles = 0; // Clear immediately on read!
+                return self.data_latch; // Bit 7 is already set in GCR bytes
+            } else {
+                return self.data_latch & 0x7F; // Clear bit 7 to signal "not ready yet"
             }
         }
         
@@ -192,6 +194,22 @@ impl Disk2 {
     pub fn tick(&mut self, cycles: u32) {
         if self.motor_on {
             self.cycles_since_last_byte += cycles;
+            if self.latch_valid_cycles > 0 {
+                self.latch_valid_cycles -= cycles as i32;
+            }
+
+            while self.cycles_since_last_byte >= 32 {
+                self.cycles_since_last_byte -= 32;
+
+                if self.is_disk_loaded {
+                    let track = &self.tracks[self.current_track];
+                    if track.length > 0 {
+                        self.data_latch = track.raw_bytes[self.byte_index];
+                        self.latch_valid_cycles = 32; // Full 32 cycles window
+                        self.byte_index = (self.byte_index + 1) % track.length;
+                    }
+                }
+            }
         }
     }
 
@@ -203,6 +221,9 @@ impl Disk2 {
         self.current_track = 0;
         self.byte_index = 0;
         self.cycles_since_last_byte = 0;
+        self.data_latch = 0;
+        self.latch_valid = false;
+        self.latch_valid_cycles = 0;
         self.phases = [false; 4];
         self.phase_index = 0;
     }

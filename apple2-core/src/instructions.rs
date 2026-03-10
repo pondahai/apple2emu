@@ -103,29 +103,67 @@ impl CPU {
 
     // --- Math & Logical (ALU) ---
     pub(crate) fn adc<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        let value = self.read_operand(mem, mode);
-        self.add_to_accumulator(value);
+        let data = self.read_operand(mem, mode);
+        
+        if self.status.d {
+            // Decimal Mode ADC
+            let mut lower = (self.a & 0x0F) + (data & 0x0F) + (if self.status.c { 1 } else { 0 });
+            let mut upper = (self.a >> 4) + (data >> 4) + (if lower > 0x09 { 1 } else { 0 });
+            
+            // Set Zero flag before decimal adjustment
+            self.status.z = self.a.wrapping_add(data).wrapping_add(if self.status.c { 1 } else { 0 }) == 0;
+            self.status.n = (upper & 0x08) != 0;
+            
+            self.status.v = (((self.a ^ data) & 0x80) == 0) && (((self.a ^ (upper << 4)) & 0x80) != 0);
+
+            if lower > 0x09 { lower += 0x06; }
+            if upper > 0x09 { upper += 0x06; }
+            
+            self.status.c = upper > 0x0F;
+            self.a = ((upper << 4) | (lower & 0x0F)) as u8;
+        } else {
+            // Binary Mode ADC
+            let sum = self.a as u16 + data as u16 + (if self.status.c { 1 } else { 0 }) as u16;
+            self.status.c = sum > 0xFF;
+            let result = sum as u8;
+            self.status.v = (self.a ^ result) & (data ^ result) & 0x80 != 0;
+            self.a = result;
+            self.update_zero_and_negative_flags(self.a);
+        }
     }
 
     pub(crate) fn sbc<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        let value = self.read_operand(mem, mode);
-        self.add_to_accumulator(!value); // SBC is ADC with inverted operand
-    }
+        let data = self.read_operand(mem, mode);
+        
+        if self.status.d {
+            // Decimal Mode SBC
+            let diff = self.a as i32 - data as i32 - (if self.status.c { 0 } else { 1 }) as i32;
+            let mut lower = (self.a & 0x0F) as i32 - (data & 0x0F) as i32 - (if self.status.c { 0 } else { 1 }) as i32;
+            let mut upper = (self.a >> 4) as i32 - (data >> 4) as i32;
+            if lower < 0 {
+                lower -= 0x06;
+                upper -= 1;
+            }
+            if upper < 0 {
+                upper -= 0x06;
+            }
+            
+            let mut sum = self.a as u16 + (!data) as u16 + (if self.status.c { 1 } else { 0 }) as u16;
+            self.status.c = diff >= 0;
+            self.status.v = (self.a ^ sum as u8) & ((!data) ^ sum as u8) & 0x80 != 0;
+            self.status.z = (diff & 0xFF) == 0;
+            self.status.n = (diff & 0x80) != 0;
 
-    fn add_to_accumulator(&mut self, data: u8) {
-        let sum = self.a as u16 
-            + data as u16 
-            + (if self.status.c { 1 } else { 0 }) as u16;
-        
-        self.status.c = sum > 0xFF;
-        let result = sum as u8;
-        
-        // Overflow occurs if signs of inputs are same, but sign of result is different
-        // (A ^ result) & (data ^ result) & 0x80 != 0
-        self.status.v = (self.a ^ result) & (data ^ result) & 0x80 != 0;
-        
-        self.a = result;
-        self.update_zero_and_negative_flags(self.a);
+            self.a = ((upper << 4) | (lower & 0x0F)) as u8;
+        } else {
+            // Binary Mode SBC
+            let sum = self.a as u16 + (!data) as u16 + (if self.status.c { 1 } else { 0 }) as u16;
+            self.status.c = sum > 0xFF;
+            let result = sum as u8;
+            self.status.v = (self.a ^ result) & ((!data) ^ result) & 0x80 != 0;
+            self.a = result;
+            self.update_zero_and_negative_flags(self.a);
+        }
     }
 
     pub(crate) fn and<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {

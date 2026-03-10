@@ -1,0 +1,14 @@
+Starting Apple II Emulator targeting Windows (minifb) and core no_std...
+Warning: Could not open ../roms/APPLE2PLUS.ROM. Using empty memory.
+Warning: Could not open Disk II Boot ROM
+Loaded MASTER.DSK floppy image: 140KB
+CPU Reset Vector: 0000 (Normal boot)
+Memory at $0800: 00 00 00 00 00 00 00 00
+CPU PC: 0000
+Disk Status: Track=0, ByteIndex=0, CyclesSinceByte=0
+Memory at $0800: 00 00 00 00 00 00 00 00
+CPU PC: 0000 A:00 X:00 Y:00 S:2D P:24 Code: 00 00 00
+Memory at $0800: 00 00 00 00 00 00 00 00
+CPU PC: 0000
+Memory at $0800: 00 00 00 00 00 00 00 00
+CPU PC: 0000
