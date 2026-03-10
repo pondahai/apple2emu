@@ -1,0 +1,9 @@
+[package]
+name = "apple2-desktop"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+minifb = "0.27"
+apple2-core = { path = "../apple2-core" }
+arboard = "3.4.0"

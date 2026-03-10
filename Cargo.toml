@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "apple2-core",
+    "apple2-desktop",
+]
+resolver = "2"
