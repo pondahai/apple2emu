@@ -3,6 +3,7 @@ use minifb::{Key, Window, WindowOptions};
 use apple2_core::machine::Apple2Machine;
 use apple2_core::video::{Video, SCREEN_WIDTH, SCREEN_HEIGHT};
 use apple2_core::memory::Memory;
+use rodio::{OutputStream, Sink};
 
 fn main() {
     println!("Starting Apple II Emulator targeting Windows (minifb) and core no_std...");
@@ -21,6 +22,18 @@ fn main() {
     // Initialize the emulator core
     let mut machine = Apple2Machine::new();
     let mut video = Video::new();
+
+    // Setup an audio stream
+    let audio_device = OutputStream::try_default();
+    let (mut _stream, mut sink) = (None, None);
+    if let Ok((s, sh)) = audio_device {
+        _stream = Some(s);
+        if let Ok(sk) = Sink::try_new(&sh) {
+            sink = Some(sk);
+        }
+    } else {
+        println!("Warning: Could not initialize audio output.");
+    }
 
     // The downloaded ROM is ~20KB. Typical layout for these dumps:
     // Load the correct Apple II+ ROM set (341-0011 through 341-0020)
@@ -191,10 +204,22 @@ fn main() {
 
         // 2. Emulate CPU execution for one Frame (~17,050 1MHz cycles per 1/60th sec)
         let mut frame_cycles = 0;
+        let mut audio_samples: Vec<f32> = Vec::with_capacity(750);
+        let mut unprocessed_cycles = 0.0;
+        let cycles_per_sample = 1_023_000.0 / 44100.0;
+
         while frame_cycles < 17_050 {
             let pc_before = machine.cpu.pc;
             let cycles = machine.step();
             frame_cycles += cycles;
+
+            // Generate audio samples based on CPU cycles passed
+            unprocessed_cycles += cycles as f32;
+            while unprocessed_cycles >= cycles_per_sample {
+                let sample_val = if machine.mem.speaker { 0.1 } else { -0.1 };
+                audio_samples.push(sample_val);
+                unprocessed_cycles -= cycles_per_sample;
+            }
 
             // Detect jumps TO or FROM the C600 range, or unusual PC values
             if machine.cpu.pc >= 0xC600 && machine.cpu.pc <= 0xC6FF && pc_before < 0xC600 {
@@ -202,6 +227,18 @@ fn main() {
             }
             if pc_before >= 0xC600 && pc_before <= 0xC6FF && machine.cpu.pc < 0xC600 {
                 println!(">>> LEFT C600 boot ROM to PC={:04X}", machine.cpu.pc);
+            }
+        }
+
+        // Output audio frame
+        if let Some(s) = &sink {
+            if !audio_samples.is_empty() {
+                let source = rodio::buffer::SamplesBuffer::new(1, 44100, audio_samples);
+                s.append(source);
+                // Keep the queue from lagging behind realtime
+                if s.len() > 3 {
+                    s.clear();
+                }
             }
         }
 

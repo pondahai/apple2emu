@@ -7,7 +7,7 @@ A custom-built Apple II/II+ emulator written from scratch in Rust. It aims to ac
 This emulator is split into a workspace with two main crates:
 
 - **`apple2-core`**: The core library handling all hardware emulation. It is designed to be `no_std` compatible, allowing the core emulation logic to potentially run on embedded devices (like ESP32/RP2040) or WebAssembly without operating system dependencies.
-- **`apple2-desktop`**: The Windows/Desktop GUI frontend. It uses the `minifb` crate for high-performance cross-platform windowing, frame buffering, and input handling. It also uses `arboard` for clipboard support.
+- **`apple2-desktop`**: The Windows/Desktop GUI frontend. It uses the `minifb` crate for high-performance cross-platform windowing, frame buffering, and input handling. It also uses `arboard` for clipboard support, and `rodio` for real-time audio playback.
 
 ## Features
 
@@ -35,6 +35,10 @@ This emulator is split into a workspace with two main crates:
 - **Control Key Modifier**: Supports Apple II specific control sequences (like `Ctrl+B` to drop into BASIC from the Monitor).
 - **Shift Key Modifier**: Translates symbols (e.g., `!`, `@`, `#`) correctly.
 - **Clipboard Paste**: Press `Ctrl+V` to inject text directly from the host OS clipboard into the Apple II keyboard stream. Converts lowercase to uppercase automatically and maps newlines to Apple II Return (0x0D), allowing you to paste entire blocks of BASIC code instantly.
+
+### Audio Emulation
+- Toggles the speaker state precisely via the `$C030` memory-mapped I/O port.
+- Tracks exact cycle counts between toggles to generate cycle-accurate 44.1kHz square wave audio in real-time.
 
 ### Disk II Controller (Slot 6)
 - Custom state machine emulating the Disk II sequencer.

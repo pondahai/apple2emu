@@ -29,6 +29,9 @@ pub struct Apple2Memory {
 
     // Disk II controller in Slot 6
     pub disk2: alloc::boxed::Box<Disk2>,
+
+    // Speaker State
+    pub speaker: bool,
 }
 
 impl Apple2Memory {
@@ -42,6 +45,7 @@ impl Apple2Memory {
             hires_mode: false,
             keyboard_latch: 0,
             disk2: alloc::boxed::Box::new(Disk2::new()),
+            speaker: false,
         }
     }
 
@@ -85,6 +89,12 @@ impl Memory for Apple2Memory {
                     0xC056 => { self.hires_mode = false; 0 } // Lo-Res
                     0xC057 => { self.hires_mode = true; 0 }  // Hi-Res
                     
+                    // Speaker toggle ($C030)
+                    0xC030 => {
+                        self.speaker = !self.speaker;
+                        0
+                    }
+
                     // Slot 6 ROM
                     0xC600..=0xC6FF => {
                         self.disk2.rom[(addr - 0xC600) as usize]
@@ -127,7 +137,11 @@ impl Memory for Apple2Memory {
                     0xC056 => { self.hires_mode = false; } // Lo-Res
                     0xC057 => { self.hires_mode = true; }  // Hi-Res
                     
-                    // TODO: Speaker toggle
+                    // Speaker toggle ($C030)
+                    0xC030 => {
+                        self.speaker = !self.speaker;
+                    }
+
                     _ => {}
                 }
             }
