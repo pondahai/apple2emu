@@ -33,4 +33,9 @@ impl Apple2Machine {
     pub fn tick_disk(&mut self, cycles: u32) {
         self.mem.disk2.tick(cycles);
     }
+
+    pub fn power_on(&mut self) {
+        self.mem.power_on_reset();
+        self.cpu.reset(&mut *self.mem);
+    }
 }

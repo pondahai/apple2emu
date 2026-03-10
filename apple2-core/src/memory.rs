@@ -53,6 +53,20 @@ impl Apple2Memory {
         let copy_len = data.len().min(self.rom.len());
         self.rom[..copy_len].copy_from_slice(&data[..copy_len]);
     }
+
+    pub fn power_on_reset(&mut self) {
+        self.ram.fill(0); // Clear RAM to initial state
+        self.text_mode = true;
+        self.mixed_mode = false;
+        self.page2 = false;
+        self.hires_mode = false;
+        self.keyboard_latch = 0;
+        self.speaker = false;
+        self.disk2.reset();
+        
+        // Ensure Apple II ROM performs a cold boot by clearing the signature
+        self.ram[0x03F4] = 0;
+    }
 }
 
 // Memory map implementation specific for Apple II

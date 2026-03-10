@@ -194,4 +194,16 @@ impl Disk2 {
             self.cycles_since_last_byte += cycles;
         }
     }
+
+    pub fn reset(&mut self) {
+        self.motor_on = false;
+        self.drive_select = 1;
+        self.write_mode = false;
+        self.load_mode = false;
+        self.current_track = 0;
+        self.byte_index = 0;
+        self.cycles_since_last_byte = 0;
+        self.phases = [false; 4];
+        self.phase_index = 0;
+    }
 }

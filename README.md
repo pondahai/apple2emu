@@ -44,6 +44,7 @@ This emulator is split into a workspace with two main crates:
 - Custom state machine emulating the Disk II sequencer.
 - Cycle-accurate rotational delays (~32 CPU cycles per byte) satisfying the tight timing loops of the DOS 3.3 RWTS routines.
 - Read sequencing and GCR (6-and-2 / 4-and-4) decoding capable of booting raw `.dsk` images.
+- **Dynamic Disk Loading**: Press `F3` to open a file selection dialog. Supports standard `.dsk`, `.do`, `.po` images and Gzip compressed `.gz` images.
 
 ## Requirements
 
@@ -66,12 +67,14 @@ Ensure your terminal is in the project's root workspace folder, then run:
 cargo run --bin apple2-desktop
 ```
 
-### Basic Usage
+### Hotkeys & Basic Usage
 
-- **Booting**: The emulator resets to the normal boot vector. If a disk is loaded, it attempts to boot DOS 3.3.
+- **`F2`**: **Reboot**. Restarts the emulator and performs a clean boot from disk (simulates a power-on).
+- **`Ctrl + Delete`**: **System Reset**. Simulates the physical `Reset` key on an Apple II (warm reset).
+- **`F3`**: **Load Disk Image**. Opens a system file dialog to choose a `.dsk` or `.gz` disk image.
+- **`Ctrl + V`**: **Paste Text**. Inject text from your host clipboard directly into the Apple II keyboard stream.
 - **Monitor**: To enter the Monitor manually from BASIC, type `CALL -151`.
 - **BASIC**: To enter AppleSoft BASIC from the Monitor (`*`), type `Ctrl+B` and press `Enter`.
-- **Pasting Code**: Copy any text from your computer, click the emulator window, and press `Ctrl+V`.
 
 ## License
 Created as an experimental Rust emulation project.

@@ -4,6 +4,8 @@ use apple2_core::machine::Apple2Machine;
 use apple2_core::video::{Video, SCREEN_WIDTH, SCREEN_HEIGHT};
 use apple2_core::memory::Memory;
 use rodio::{OutputStream, Sink};
+use std::io::Read;
+use flate2::read::GzDecoder;
 
 fn main() {
     println!("Starting Apple II Emulator targeting Windows (minifb) and core no_std...");
@@ -98,6 +100,11 @@ fn main() {
     let mut key_queue: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
     let mut last_keys: Vec<Key> = Vec::new();
     let mut clipboard = arboard::Clipboard::new().ok();
+    
+    // Track F3 key to prevent multiple dialogs
+    let mut last_f3_down = false;
+    let mut last_f2_down = false;
+    let mut last_delete_down = false;
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         
@@ -194,6 +201,67 @@ fn main() {
                 key_queue.push_back(ascii);
             }
         }
+
+        // --- System Hotkeys ---
+        
+        // F2: Reboot (Cold Boot)
+        let f2_down = window.is_key_down(Key::F2);
+        if f2_down && !last_f2_down {
+            println!(">>> REBOOT");
+            machine.power_on();
+            // Simple restart: Machine state is cleared, and CPU starts from Reset Vector.
+        }
+        last_f2_down = f2_down;
+
+        // Ctrl-Delete: System Reset
+        let delete_down = window.is_key_down(Key::Delete);
+        if delete_down && !last_delete_down {
+            let ctrl_down = window.is_key_down(Key::LeftCtrl) || window.is_key_down(Key::RightCtrl);
+            if ctrl_down {
+                println!(">>> SYSTEM RESET (Warm Boot)");
+                machine.reset();
+            }
+        }
+        last_delete_down = delete_down;
+
+        // F3: Load Disk
+        let f3_down = window.is_key_down(Key::F3);
+        if f3_down && !last_f3_down {
+            println!(">>> Opening Disk Load Dialog...");
+            let file = rfd::FileDialog::new()
+                .add_filter("Apple II Disk Image", &["dsk", "do", "po", "gz"])
+                .add_filter("All Files", &["*"])
+                .pick_file();
+
+            if let Some(path) = file {
+                if let Ok(mut raw_data) = std::fs::read(&path) {
+                    let mut disk_image = Vec::new();
+                    
+                    // Check if gzipped
+                    if path.extension().and_then(|e| e.to_str()) == Some("gz") {
+                        println!(">>> Decompressing Gzip file...");
+                        let mut decoder = GzDecoder::new(&raw_data[..]);
+                        if let Err(e) = decoder.read_to_end(&mut disk_image) {
+                            println!("Error decompressing Gzip: {}", e);
+                            disk_image.clear();
+                        }
+                    } else {
+                        disk_image = raw_data;
+                    }
+
+                    if disk_image.len() == 143360 {
+                        machine.mem.disk2.load_disk(&disk_image);
+                        println!("Successfully loaded disk: {:?}", path.file_name().unwrap_or_default());
+                    } else if !disk_image.is_empty() {
+                        println!("Warning: Disk size mismatch ({} bytes). Expected 140KB.", disk_image.len());
+                    }
+                }
+            }
+        }
+        last_f3_down = f3_down;
+        
+        // ----------------------
+
         // Feed next key from queue only if the Apple II has consumed the previous one
         // (keyboard_latch bit 7 is clear = consumed)
         if (machine.mem.keyboard_latch & 0x80) == 0 {
