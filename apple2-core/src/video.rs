@@ -6,6 +6,7 @@ pub const SCREEN_HEIGHT: usize = 192; // 24 rows * 8 pixels per char
 
 /// Apple II Text Video memory is interleaved in a strange way
 /// This maps visual row (0-23) to memory row offset (0x0400 to 0x07F8)
+#[allow(dead_code)]
 const ROW_ADDRESSES: [u16; 24] = [
     0x0400, 0x0480, 0x0500, 0x0580, 0x0428, 0x04A8, 0x0528, 0x05A8,
     0x0450, 0x04D0, 0x0550, 0x05D0, 0x0400 + 0x28, 0x0480 + 0x28, 0x0500 + 0x28, 0x0580 + 0x28,

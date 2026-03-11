@@ -38,12 +38,16 @@ This emulator is split into a workspace with two main crates:
 
 ### Audio Emulation
 - Toggles the speaker state precisely via the `$C030` memory-mapped I/O port.
-- Tracks exact cycle counts between toggles to generate cycle-accurate 44.1kHz square wave audio in real-time.
+- Tracks exact cycle counts between toggles to generate cycle-accurate audio in real-time.
+- Employs a custom High-pass filter (DC Blocker) to quickly decay continuous voltage when the speaker is idle, eliminating annoying continuous pop/crack sounds.
+- Runs at a robust 22,050 Hz sample rate with fractional CPU cycle phase-tracking across audio frames for smoother beep generation. 
+- Implements automated audio buffer padding to prevent chopped audio playback during heavy CPU or rendering loads.
 
 ### Disk II Controller (Slot 6)
 - Custom state machine emulating the Disk II sequencer.
+- Accurate quarter-track magnetic phase stepper motor emulation.
 - Cycle-accurate rotational delays (~32 CPU cycles per byte) satisfying the tight timing loops of the DOS 3.3 RWTS routines.
-- Read sequencing and GCR (6-and-2 / 4-and-4) decoding capable of booting raw `.dsk` images.
+- Read sequencing and GCR (6-and-2 / 4-and-4) decoding capable of fully booting DOS 3.3 raw `.dsk` images into Applesoft BASIC.
 - **Dynamic Disk Loading**: Press `F3` to open a file selection dialog. Supports standard `.dsk`, `.do`, `.po` images and Gzip compressed `.gz` images.
 
 ## Requirements
@@ -51,13 +55,15 @@ This emulator is split into a workspace with two main crates:
 To build and run this emulator, you need:
 
 1. **Rust Toolchain**: Install via [rustup.rs](https://rustup.rs/).
-2. **Apple II System ROMs**: 
-   - `APPLE2PLUS.ROM` (12KB)
-   - `341-0036.bin` (2KB Character ROM)
-   - `DOS33_ROM.bin` (256 byte Disk Controller ROM)
-3. **DOS 3.3 Disk Image**: e.g., `MASTER.DSK` (140KB).
+2. **Apple II ROM Files** — place all in the `roms/` folder (see `SETUP.md` for sources):
+   - `APPLE2PLUS.ROM` (12KB — Apple II+ Motherboard ROM)
+   - `Apple II plus Video ROM - 341-0036 - Rev. 7.bin` (2KB — Character ROM)
+   - `DISK2.ROM` (256 bytes — Official Disk II Controller ROM, P5A / 341-0027)
+   - `DISK2_P6.ROM` (256 bytes — Official State Machine ROM, 341-0028 - reserved for future use)
+3. **DOS 3.3 Disk Image**: `MASTER.DSK` (140KB) — place in `roms/MASTER.DSK`
 
-*(Note: ROM and disk image paths are currently hardcoded in `apple2-desktop/src/main.rs`. Please update them to point to your local files).*
+All paths are **relative** (`../roms/...`) — no hardcoded absolute paths needed.
+See `SETUP.md` for full instructions on where to get each file.
 
 ## Building and Running
 

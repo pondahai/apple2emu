@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use minifb::{Key, Window, WindowOptions};
 use apple2_core::machine::Apple2Machine;
 use apple2_core::video::{Video, SCREEN_WIDTH, SCREEN_HEIGHT};
@@ -37,46 +37,70 @@ fn main() {
         println!("Warning: Could not initialize audio output.");
     }
 
+    // Resolve the roms/ directory.
+    // 1. Try relative to the executable (e.g., target/debug/../..)
+    // 2. Try ./roms (relative to current working directory)
+    // 3. Fallback to ../roms (if run from a subdirectory)
+    let roms_dir = if let Ok(mut p) = std::env::current_exe() {
+        p.pop(); // exe
+        p.pop(); // debug/release
+        p.pop(); // target
+        let d = p.join("roms");
+        if d.exists() { d } else {
+            let d = std::path::PathBuf::from("roms");
+            if d.exists() { d } else {
+                std::path::PathBuf::from("../roms")
+            }
+        }
+    } else {
+        std::path::PathBuf::from("roms")
+    };
+    println!(">>> Using ROMs directory: {:?}", roms_dir);
+
     // The downloaded ROM is ~20KB. Typical layout for these dumps:
     // Load the correct Apple II+ ROM set (341-0011 through 341-0020)
     // Downloaded from mirrors.apple2.org.za, merged into a single 12KB file
     let mut char_rom = [0x55u8; 2048]; // Checkerboard fallback
-    if let Ok(rom_file) = std::fs::read("../roms/APPLE2PLUS.ROM") {
+    let main_rom_path = roms_dir.join("APPLE2PLUS.ROM");
+    if let Ok(rom_file) = std::fs::read(&main_rom_path) {
         println!("Loaded Apple II+ ROM: {} bytes", rom_file.len());
         if rom_file.len() >= 12288 {
             let start = rom_file.len() - 12288;
             machine.load_rom(&rom_file[start..]);
         }
     } else {
-        println!("Warning: Could not open ../roms/APPLE2PLUS.ROM. Using empty memory.");
+        println!("Warning: Could not open {}. Using empty memory.", main_rom_path.display());
     }
     
     // Apple II+ Character ROM (341-0036 Rev. 7)
-    if let Ok(char_file) = std::fs::read("../roms/341-0036.bin") {
+    let char_rom_path = roms_dir.join("Apple II plus Video ROM - 341-0036 - Rev. 7.bin");
+    let fallback_char_path = roms_dir.join("extracted_2048_152.bin");
+    if let Ok(char_file) = std::fs::read(&char_rom_path) {
         if char_file.len() == 2048 {
             char_rom.copy_from_slice(&char_file);
             println!("Loaded Character ROM (341-0036): 2048 bytes");
         }
-    } else if let Ok(char_file) = std::fs::read("../roms/extracted_2048_152.bin") {
+    } else if let Ok(char_file) = std::fs::read(&fallback_char_path) {
         if char_file.len() == 2048 {
             char_rom.copy_from_slice(&char_file);
             println!("Loaded Character ROM (fallback): 2048 bytes");
         }
     }
     
-    // Load Disk II Boot ROM into Slot 6
-    if let Ok(disk_rom) = std::fs::read("../roms/extracted_256_150.bin") {
+    // Load Disk II Boot ROM (P5A / 341-0027) into Slot 6
+    let disk_rom_path = roms_dir.join("DISK2.ROM");
+    if let Ok(disk_rom) = std::fs::read(&disk_rom_path) {
         if disk_rom.len() == 256 {
             machine.mem.disk2.load_boot_rom(&disk_rom);
             println!("Loaded Disk II Boot ROM (Slot 6): 256 bytes");
         }
     } else {
-        println!("Warning: Could not open Disk II Boot ROM");
+        println!("Warning: Could not open Disk II Boot ROM at {}", disk_rom_path.display());
     }
 
-    // Load DOS 3.3 MASTER.DSK
-    let dsk_path = r"C:\Users\Dell\Downloads\AppleWin1.30.18.0\MASTER.DSK";
-    if let Ok(disk_image) = std::fs::read(dsk_path) {
+    // Load DOS 3.3 MASTER.DSK (place in roms/ folder - see SETUP.md)
+    let dsk_path = roms_dir.join("MASTER.DSK");
+    if let Ok(disk_image) = std::fs::read(&dsk_path) {
         if disk_image.len() == 143360 {
             machine.mem.disk2.load_disk(&disk_image);
             println!("Loaded MASTER.DSK floppy image: 140KB");
@@ -84,16 +108,14 @@ fn main() {
             println!("Warning: MASTER.DSK size mismatch: {}", disk_image.len());
         }
     } else {
-        println!("Warning: Could not open MASTER.DSK at {}", dsk_path);
+        println!("Warning: Could not open MASTER.DSK at {}", dsk_path.display());
     }
 
     // Initialize Memory mapped states and then Reset CPU
     machine.reset();
 
     // Normal boot: let the Autostart ROM initialize the system
-    // User can type PR#6 to boot the Disk II
-    // machine.cpu.pc = 0xC600;
-
+    // This will display the "APPLE ][" logo and scan slots.
     println!("CPU Reset Vector: {:04X} (Normal boot)", machine.cpu.pc);
 
     let mut last_cycle = Instant::now();
@@ -105,11 +127,18 @@ fn main() {
     let mut last_f3_down = false;
     let mut last_f2_down = false;
     let mut last_delete_down = false;
+    let start_time = Instant::now();
+    // Audio Phase Tracking
+    let mut unprocessed_cycles: f32 = 0.0;
+    
+    // Simple DC Blocker filter state
+    let mut dc_filter_x1: f32 = 0.0;
+    let mut dc_filter_y1: f32 = 0.0;
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        
+
         // 1. Handle Input
-        // Extract all currently pressed keys
+        // ... (input handling remains same)
         let current_keys = window.get_keys();
         let mut keys = Vec::new();
         for &k in &current_keys {
@@ -123,7 +152,6 @@ fn main() {
         
         for &key in keys.iter() {
             let ascii = match key {
-                // Letters are always uppercase on Apple II/II+ unless we add lower case mod, but Shift+Letter is still uppercase
                 Key::A => if ctrl_down { 0x01 } else { b'A' },
                 Key::B => if ctrl_down { 0x02 } else { b'B' },
                 Key::C => if ctrl_down { 0x03 } else { b'C' },
@@ -152,27 +180,20 @@ fn main() {
                                 for c in text.chars() {
                                     if c == '\r' { continue; }
                                     let mut ascii = c.to_ascii_uppercase() as u8;
-                                    if ascii == b'\n' {
-                                        ascii = 0x0D; // Apple II Return
-                                    }
-                                    // Make sure it's valid printable ASCII or Return/Backspace
+                                    if ascii == b'\n' { ascii = 0x0D; }
                                     if (ascii >= 0x20 && ascii <= 0x7F) || ascii == 0x0D || ascii == 0x08 {
                                         key_queue.push_back(ascii);
                                     }
                                 }
                             }
                         }
-                        0 // Return 0 since characters are already queued
-                    } else {
-                        b'V'
-                    }
+                        0
+                    } else { b'V' }
                 },
                 Key::W => if ctrl_down { 0x17 } else { b'W' },
                 Key::X => if ctrl_down { 0x18 } else { b'X' },
                 Key::Y => if ctrl_down { 0x19 } else { b'Y' },
                 Key::Z => if ctrl_down { 0x1A } else { b'Z' },
-                
-                // Numbers and Symbols
                 Key::Key0 => if shift_down { b')' } else { b'0' }, 
                 Key::Key1 => if shift_down { b'!' } else { b'1' }, 
                 Key::Key2 => if shift_down { b'@' } else { b'2' }, 
@@ -183,7 +204,6 @@ fn main() {
                 Key::Key7 => if shift_down { b'&' } else { b'7' }, 
                 Key::Key8 => if shift_down { b'*' } else { b'8' }, 
                 Key::Key9 => if shift_down { b'(' } else { b'9' },
-                
                 Key::Minus => if shift_down { b'_' } else { b'-' }, 
                 Key::Equal => if shift_down { b'+' } else { b'=' }, 
                 Key::Comma => if shift_down { b'<' } else { b',' }, 
@@ -191,29 +211,19 @@ fn main() {
                 Key::Slash => if shift_down { b'?' } else { b'/' }, 
                 Key::Semicolon => if shift_down { b':' } else { b';' },
                 Key::Apostrophe => if shift_down { b'"' } else { b'\'' },
-                
-                // Control Keys
                 Key::Space => b' ', Key::Enter => 0x0D, Key::Escape => 0x1B, Key::Backspace => 0x08,
-                
                 _ => 0,
             };
-            if ascii != 0 {
-                key_queue.push_back(ascii);
-            }
+            if ascii != 0 { key_queue.push_back(ascii); }
         }
 
-        // --- System Hotkeys ---
-        
-        // F2: Reboot (Cold Boot)
         let f2_down = window.is_key_down(Key::F2);
         if f2_down && !last_f2_down {
             println!(">>> REBOOT");
             machine.power_on();
-            // Simple restart: Machine state is cleared, and CPU starts from Reset Vector.
         }
         last_f2_down = f2_down;
 
-        // Ctrl-Delete: System Reset
         let delete_down = window.is_key_down(Key::Delete);
         if delete_down && !last_delete_down {
             let ctrl_down = window.is_key_down(Key::LeftCtrl) || window.is_key_down(Key::RightCtrl);
@@ -224,89 +234,74 @@ fn main() {
         }
         last_delete_down = delete_down;
 
-        // F3: Load Disk
         let f3_down = window.is_key_down(Key::F3);
         if f3_down && !last_f3_down {
-            println!(">>> Opening Disk Load Dialog...");
             let file = rfd::FileDialog::new()
                 .add_filter("Apple II Disk Image", &["dsk", "do", "po", "gz"])
-                .add_filter("All Files", &["*"])
                 .pick_file();
-
             if let Some(path) = file {
-                if let Ok(mut raw_data) = std::fs::read(&path) {
-                    let mut disk_image = Vec::new();
-                    
-                    // Check if gzipped
-                    if path.extension().and_then(|e| e.to_str()) == Some("gz") {
-                        println!(">>> Decompressing Gzip file...");
-                        let mut decoder = GzDecoder::new(&raw_data[..]);
-                        if let Err(e) = decoder.read_to_end(&mut disk_image) {
-                            println!("Error decompressing Gzip: {}", e);
-                            disk_image.clear();
-                        }
-                    } else {
-                        disk_image = raw_data;
-                    }
-
-                    if disk_image.len() == 143360 {
-                        machine.mem.disk2.load_disk(&disk_image);
-                        println!("Successfully loaded disk: {:?}", path.file_name().unwrap_or_default());
-                    } else if !disk_image.is_empty() {
-                        println!("Warning: Disk size mismatch ({} bytes). Expected 140KB.", disk_image.len());
-                    }
+                if let Ok(raw_data) = std::fs::read(&path) {
+                    machine.mem.disk2.load_disk(&raw_data);
+                    println!("Successfully loaded disk: {:?}", path.file_name().unwrap_or_default());
                 }
             }
         }
         last_f3_down = f3_down;
-        
-        // ----------------------
 
-        // Feed next key from queue only if the Apple II has consumed the previous one
-        // (keyboard_latch bit 7 is clear = consumed)
         if (machine.mem.keyboard_latch & 0x80) == 0 {
             if let Some(ascii) = key_queue.pop_front() {
                 machine.mem.keyboard_latch = 0x80 | ascii;
             }
         }
 
-        // 2. Emulate CPU execution for one Frame (~17,050 1MHz cycles per 1/60th sec)
+        // 2. Emulate CPU execution for one Frame
         let mut frame_cycles = 0;
         let mut audio_samples: Vec<f32> = Vec::with_capacity(750);
-        let mut unprocessed_cycles = 0.0;
-        let cycles_per_sample = 1_023_000.0 / 44100.0;
+        let sample_rate = 22050.0;
+        let cycles_per_sample = 1_023_000.0 / sample_rate;
 
         while frame_cycles < 17_050 {
-            let pc_before = machine.cpu.pc;
             let cycles = machine.step();
             frame_cycles += cycles;
 
-            // Generate audio samples based on CPU cycles passed
             unprocessed_cycles += cycles as f32;
             while unprocessed_cycles >= cycles_per_sample {
-                let sample_val = if machine.mem.speaker { 0.1 } else { -0.1 };
-                audio_samples.push(sample_val);
+                let raw_sample_val = if machine.mem.speaker { 0.1 } else { -0.1 };
+                let r = 0.995;
+                let filtered_val = raw_sample_val - dc_filter_x1 + r * dc_filter_y1;
+                dc_filter_x1 = raw_sample_val;
+                dc_filter_y1 = filtered_val;
+                audio_samples.push(filtered_val);
                 unprocessed_cycles -= cycles_per_sample;
-            }
-
-            // Detect jumps TO or FROM the C600 range, or unusual PC values
-            if machine.cpu.pc >= 0xC600 && machine.cpu.pc <= 0xC6FF && pc_before < 0xC600 {
-                println!(">>> ENTERED C600 boot ROM from PC={:04X}", pc_before);
-            }
-            if pc_before >= 0xC600 && pc_before <= 0xC6FF && machine.cpu.pc < 0xC600 {
-                println!(">>> LEFT C600 boot ROM to PC={:04X}", machine.cpu.pc);
             }
         }
 
         // Output audio frame
         if let Some(s) = &sink {
             if !audio_samples.is_empty() {
-                let source = rodio::buffer::SamplesBuffer::new(1, 44100, audio_samples);
-                s.append(source);
-                // Keep the queue from lagging behind realtime
-                if s.len() > 3 {
+                // To prevent chopped audio, we want to maintain a healthy backlog ahead of the soundcard.
+                let buf_len = s.len();
+                
+                // If queue is absurdly long (emulator dragging/paused), clear and resync
+                if buf_len > 15 {
                     s.clear();
                 }
+                
+                // If the queue is running dry (under 2 frames), we inject a tiny bit of silence
+                // to give the emulator a moment to catch up, preventing hard clipping.
+                if buf_len == 0 {
+                    let mut padding = vec![0.0; (sample_rate / 60.0) as usize];
+                    // smoothly transition the padding into silence
+                    for x in padding.iter_mut() {
+                        *x = dc_filter_y1;
+                        dc_filter_y1 *= 0.995;
+                    }
+                    let pad_source = rodio::buffer::SamplesBuffer::new(1, sample_rate as u32, padding);
+                    s.append(pad_source);
+                }
+
+                let source = rodio::buffer::SamplesBuffer::new(1, sample_rate as u32, audio_samples);
+                s.append(source);
             }
         }
 
@@ -353,7 +348,7 @@ fn main() {
 
         // Debug: Print the 1st line of the screen to console to see if it booted!
         if last_cycle.elapsed().as_secs() >= 1 {
-            last_cycle = Instant::now();
+            let _ = last_cycle;
             // Always print $0800 to verify boot sector decoding
             println!("Memory at $0800: {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}", 
                      machine.mem.ram[0x0800], machine.mem.ram[0x0801], 

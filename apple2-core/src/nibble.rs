@@ -1,5 +1,4 @@
 extern crate alloc;
-use alloc::vec::Vec;
 
 // Apple II DOS 3.3 Nibble Conversion
 // on the disk surface to avoid having too many consecutive zeroes.
@@ -54,8 +53,8 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
         let mut track_out = TrackData::new();
         let track_offset = track_num * 16 * 256;
 
-        // Gap 1 (Lead-in)
-        for _ in 0..48 { track_out.push(0xFF); }
+        // Gap 1 (Lead-in) - Increased for better stability
+        for _ in 0..128 { track_out.push(0xFF); }
 
         for phys_pos in 0..16 {
             let logical_sector = PHYS_TO_LOGICAL[phys_pos];
@@ -69,10 +68,10 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
             track_out.push(0x96);
 
             // Volume (default 254), Track, Sector, Checksum
-            // The address field sector number is the LOGICAL sector number
+            // CRITICAL: The sector number in the address field MUST be the PHYSICAL sector index (0..15)
             let vol = 254_u8;
             let trk = track_num as u8;
-            let sec = logical_sector as u8;
+            let sec = phys_pos as u8; // Fixed: was logical_sector
             let chk = vol ^ trk ^ sec;
 
             // 4x4 encoding for address fields
@@ -98,7 +97,7 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
             track_out.push(0xEB);
 
             // Gap 2
-            for _ in 0..10 { track_out.push(0xFF); }
+            for _ in 0..20 { track_out.push(0xFF); }
 
             // Data Field
             // Prologue: D5 AA AD
@@ -107,33 +106,58 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
             track_out.push(0xAD);
 
             // 6-and-2 Data Encoding (standard algorithm from "Beneath Apple DOS")
-            // Step 1: Build the 342 pre-nibblized bytes
-            let mut nbuf2 = [0u8; 342]; // 0..85 = secondary, 86..341 = primary
+            let mut nbuf = [0u8; 342];
             
-            // Primary buffer: top 6 bits of each data byte
+            // Primary buffer: upper 6 bits of each data byte
             for i in 0..256 {
-                nbuf2[86 + i] = sector_data[i] >> 2;
+                nbuf[86 + i] = sector_data[i] >> 2;
             }
             
-            // Secondary buffer: bottom 2 bits, packed 3 per byte
-            // The standard algorithm processes data bytes 0 up to 255,
-            // shifting the previous bits left by 2 so that larger indices end up at the bottom
-            for i in 0..256 {
-                let val = sector_data[i];
-                // Extract bottom 2 bits, bit-reversed (matches hardware LSR/ROL order)
-                let two_bits = ((val & 0x01) << 1) | ((val & 0x02) >> 1);
-                let slot = i % 86;
-                nbuf2[slot] = (nbuf2[slot] << 2) | two_bits;
+            // Secondary buffer: lower 2 bits, with specific bit-reversal
+            for i in 0..86_usize {
+                let mut val = 0u8;
+                // byte i → bits 1:0, with bit0 in high position
+                {
+                    let b = sector_data[i];
+                    val |= ((b >> 0) & 1) << 1; 
+                    val |= ((b >> 1) & 1) << 0; 
+                }
+                if i + 86 < 256 {
+                    let b = sector_data[i + 86];
+                    val |= ((b >> 0) & 1) << 3; 
+                    val |= ((b >> 1) & 1) << 2; 
+                }
+                if i + 172 < 256 {
+                    let b = sector_data[i + 172];
+                    val |= ((b >> 0) & 1) << 5; 
+                    val |= ((b >> 1) & 1) << 4; 
+                }
+                nbuf[i] = val;
             }
 
-            // Write out nbuf2 mapped through NIBBLE_WRITE_TABLE with checksums
-            let mut last = 0;
-            for i in 0..342 {
-                let val = nbuf2[i];
-                track_out.push(NIBBLE_WRITE_TABLE[(val ^ last) as usize]);
-                last = val;
+            // CRITICAL: The P5 Boot ROM reads the first 86 nibbles in REVERSE order (using DEY).
+            // To match this, we must write them to disk in the order the ROM expects to see them.
+            let mut final_nbuf = [0u8; 342];
+            for i in 0..86 {
+                final_nbuf[i] = nbuf[85 - i]; // Reverse secondary nibbles
             }
-            track_out.push(NIBBLE_WRITE_TABLE[last as usize]);
+            for i in 86..342 {
+                final_nbuf[i] = nbuf[i]; // Primary nibbles remain in forward order
+            }
+
+            // Write out mapped through NIBBLE_WRITE_TABLE with XOR chaining.
+            // Algorithm: Disk[i] = TABLE[ nbuf[i] ^ nbuf[i-1] ]
+            let mut last_val = 0u8;
+            for i in 0..342 {
+                let current_val = final_nbuf[i] & 0x3F;
+                track_out.push(NIBBLE_WRITE_TABLE[(current_val ^ last_val) as usize]);
+                last_val = current_val;
+            }
+            
+            // 343rd nibble is the XOR checksum of all 342 values.
+            let mut checksum = 0u8;
+            for i in 0..342 { checksum ^= final_nbuf[i] & 0x3F; }
+            track_out.push(NIBBLE_WRITE_TABLE[(checksum ^ last_val) as usize]);
 
             // Epilogue: DE AA EB
             track_out.push(0xDE);
@@ -141,11 +165,48 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
             track_out.push(0xEB);
 
             // Gap 3
-            for _ in 0..40 { track_out.push(0xFF); }
+            for _ in 0..80 { track_out.push(0xFF); }
         }
 
         tracks.push(track_out);
     }
 
     tracks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dump_track_0() {
+        let disk_data = std::fs::read("../roms/MASTER.DSK").unwrap();
+        let tracks = nibblize_dsk(&disk_data);
+        
+        let track0 = &tracks[0];
+        let bytes = &track0.raw_bytes[0..track0.length];
+        
+        let mut f = std::fs::File::create("C:/Temp/track0_nibbles.bin").unwrap();
+        use std::io::Write;
+        f.write_all(bytes).unwrap();
+        
+        // Find the first Data Field Prologue (D5 AA AD)
+        let mut data_prologue_idx = 0;
+        for i in 0..bytes.len()-3 {
+            if bytes[i] == 0xD5 && bytes[i+1] == 0xAA && bytes[i+2] == 0xAD {
+                data_prologue_idx = i;
+                break;
+            }
+        }
+        
+        // Find the Data Field Epilogue (DE AA EB) right after the prologue
+        // It should be exactly 3 bytes (prologue) + 343 bytes (data + checksum) = 346 bytes later
+        let epilogue_idx = data_prologue_idx + 3 + 343;
+        
+        assert_eq!(bytes[epilogue_idx], 0xDE, "Epilogue byte 1 mismatch at {} (expected DE, got {:x})", epilogue_idx, bytes[epilogue_idx]);
+        assert_eq!(bytes[epilogue_idx+1], 0xAA, "Epilogue byte 2 mismatch");
+        assert_eq!(bytes[epilogue_idx+2], 0xEB, "Epilogue byte 3 mismatch");
+        
+        println!("Data field structure verified: Prologue at {}, Epilogue at {}", data_prologue_idx, epilogue_idx);
+    }
 }

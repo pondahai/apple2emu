@@ -148,7 +148,7 @@ impl CPU {
                 upper -= 0x06;
             }
             
-            let mut sum = self.a as u16 + (!data) as u16 + (if self.status.c { 1 } else { 0 }) as u16;
+            let sum = self.a as u16 + (!data) as u16 + (if self.status.c { 1 } else { 0 }) as u16;
             self.status.c = diff >= 0;
             self.status.v = (self.a ^ sum as u8) & ((!data) ^ sum as u8) & 0x80 != 0;
             self.status.z = (diff & 0xFF) == 0;
@@ -342,16 +342,18 @@ impl CPU {
     }
 
     pub(crate) fn php<M: Memory>(&mut self, mem: &mut M) {
-        let mut flags = self.status.clone();
-        flags.b = true;
-        self.stack_push(mem, flags.to_byte());
+        // PHP always pushes the status byte with both Bit 4 (B) and Bit 5 (Unused) set to 1.
+        self.stack_push(mem, self.status.to_byte() | 0x10 | 0x20);
     }
 
     pub(crate) fn plp<M: Memory>(&mut self, mem: &mut M) {
         let flags = self.stack_pop(mem);
+        // PLP pulls the status but the B flag (Bit 4) and Unused (Bit 5) are NOT affected
+        // by the value on the stack in real 6502 hardware.
+        let b_before = self.status.b;
         self.status.from_byte(flags);
-        self.status.u = true; // u is always 1
-        self.status.b = false; // plp ignores b flag
+        self.status.b = b_before;
+        self.status.u = true; // Always 1
     }
 
     pub(crate) fn pha<M: Memory>(&mut self, mem: &mut M) {

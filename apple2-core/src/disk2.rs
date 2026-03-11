@@ -30,7 +30,7 @@ pub struct Disk2 {
     pub cycles_since_last_byte: u32,
     pub data_latch: u8,
     pub latch_valid: bool,
-    pub latch_valid_cycles: i32, // Cycles remaining where the current latch bit 7 is set
+    pub current_qtr_track: i32, // Precise mechanical position of the head
 }
 
 impl Disk2 {
@@ -56,7 +56,7 @@ impl Disk2 {
             cycles_since_last_byte: 0,
             data_latch: 0,
             latch_valid: false,
-            latch_valid_cycles: 0,
+            current_qtr_track: 0,
         }
     }
 
@@ -83,15 +83,15 @@ impl Disk2 {
             let track_len = self.tracks[self.current_track].length;
             if track_len == 0 { return 0x00; }
 
-            // Return the latched byte. 
-            // In Disk II hardware, bit 7 is set when a full nibble is shifted in. 
-            // We clear our valid window immediately on read so the CPU doesn't see 
-            // the same byte twice and get confused expecting the *next* byte.
-            if self.latch_valid_cycles > 0 {
-                self.latch_valid_cycles = 0; // Clear immediately on read!
-                return self.data_latch; // Bit 7 is already set in GCR bytes
+            // Real Disk II hardware: The shift register holds the byte with MSB=1
+            // until the next 8 bits are shifted in (approx 32 cycles).
+            // We don't clear latch_valid on read; it only changes when the next byte arrives.
+            if self.latch_valid {
+                self.bytes_read += 1;
+                return self.data_latch;
             } else {
-                return self.data_latch & 0x7F; // Clear bit 7 to signal "not ready yet"
+                // If the drive just started or is between bytes
+                return self.data_latch & 0x7F;
             }
         }
         
@@ -99,7 +99,7 @@ impl Disk2 {
     }
 
     /// Write data to the Disk II I/O registers ($C0E0 - $C0EF)
-    pub fn write_io(&mut self, addr: u16, data: u8) {
+    pub fn write_io(&mut self, addr: u16, _data: u8) {
         self.handle_io(addr);
         
         if self.motor_on && self.write_mode {
@@ -114,25 +114,26 @@ impl Disk2 {
         
         match switch {
             // $C0E0 - $C0E7: Stepper Motors. Even = OFF, Odd = ON
-            0x00 => self.phases[0] = false,
-            0x01 => { self.phases[0] = true; self.step_motor(); },
-            0x02 => self.phases[1] = false,
-            0x03 => { self.phases[1] = true; self.step_motor(); },
-            0x04 => self.phases[2] = false,
-            0x05 => { self.phases[2] = true; self.step_motor(); },
-            0x06 => self.phases[3] = false,
-            0x07 => { self.phases[3] = true; self.step_motor(); },
+            0x00 => { self.phases[0] = false; self.step_motor(); },
+            0x01 => { self.phases[0] = true;  self.step_motor(); },
+            0x02 => { self.phases[1] = false; self.step_motor(); },
+            0x03 => { self.phases[1] = true;  self.step_motor(); },
+            0x04 => { self.phases[2] = false; self.step_motor(); },
+            0x05 => { self.phases[2] = true;  self.step_motor(); },
+            0x06 => { self.phases[3] = false; self.step_motor(); },
+            0x07 => { self.phases[3] = true;  self.step_motor(); },
             
             // $C0E8 / $C0E9: Motor Off / On
             0x08 => {
                 if self.motor_on {
-                    // println!("Disk II: Motor turned OFF");
+                    println!("[Disk] Motor OFF (track={})", self.current_track);
                 }
                 self.motor_on = false;
             },
             0x09 => {
                 if !self.motor_on {
-                    // println!("Disk II: Motor turned ON");
+                    println!("[Disk] Motor ON");
+                    self.bytes_read = 0; // reset read counter
                 }
                 self.motor_on = true;
             },
@@ -154,58 +155,73 @@ impl Disk2 {
     }
     
     fn step_motor(&mut self) {
-        // Find which phase is active.
-        let mut active_phase = 0;
+        // Disk II head is attracted to all active phases.
+        // We calculate the target position based on the center of all active magnets.
+        // 1 track = 4 units in current_qtr_track.
+        // Phase 0 -> Track 0, 2, 4... (unit 0, 8, 16...)
+        // Phase 1 -> Track 0.5, 2.5... (unit 2, 10, 18...)
+        // Phase 2 -> Track 1, 3, 5... (unit 4, 12, 20...)
+        // Phase 3 -> Track 1.5, 3.5... (unit 6, 14, 22...)
+        
+        let mut sum_target = 0;
+        let mut active_count = 0;
+        
         for i in 0..4 {
             if self.phases[i] {
-                active_phase = i as u8;
-                break;
+                // Find the target for this phase nearest to the current position
+                let mut phase_target = (i as i32) * 2;
+                
+                // Adjust phase_target to be in the [current-4, current+4] range
+                while phase_target - self.current_qtr_track > 4 {
+                    phase_target -= 8;
+                }
+                while self.current_qtr_track - phase_target > 4 {
+                    phase_target += 8;
+                }
+                
+                sum_target += phase_target;
+                active_count += 1;
             }
         }
 
-        let diff = (active_phase as i8) - (self.phase_index as i8);
-        self.phase_index = active_phase;
+        if active_count > 0 {
+            let target = sum_target / active_count;
+            if self.current_qtr_track != target {
+                self.current_qtr_track = target;
+                
+                // Ensure bounds (0 to 34 tracks)
+                if self.current_qtr_track < 0 { self.current_qtr_track = 0; }
+                if self.current_qtr_track > 34 * 4 { self.current_qtr_track = 34 * 4; }
 
-        let mut current_qtr_track = (self.current_track * 2) as i32;
-
-        if diff == 1 || diff == -3 {
-            // Step in (towards higher track)
-            current_qtr_track += 1;
-        } else if diff == -1 || diff == 3 {
-            // Step out (towards track 0)
-            current_qtr_track -= 1;
+                let new_track = (self.current_qtr_track / 4) as usize;
+                if self.current_track != new_track {
+                    println!("[Disk] Track step: {} -> {} (qtr={})",
+                        self.current_track, new_track, self.current_qtr_track);
+                    self.current_track = new_track;
+                }
+            }
         }
-
-        if current_qtr_track < 0 {
-            current_qtr_track = 0;
-        }
-        if current_qtr_track > 35 * 2 {
-            current_qtr_track = 35 * 2;
-        }
-
-        let new_track = (current_qtr_track / 2) as usize;
-        
-        // Debug
-        // if self.current_track != new_track {
-        // }
-        // We probably don't need to spam step traces, but let's record the movement
-        self.current_track = new_track;
     }
     pub fn tick(&mut self, cycles: u32) {
         if self.motor_on {
             self.cycles_since_last_byte += cycles;
-            if self.latch_valid_cycles > 0 {
-                self.latch_valid_cycles -= cycles as i32;
-            }
 
+            // A new nibble window arrives approx every 32 cycles.
+            // However, real hardware is bit-based. If we are in read mode,
+            // we skip 0-bits at the start of a byte to align with the next 1-bit.
             while self.cycles_since_last_byte >= 32 {
                 self.cycles_since_last_byte -= 32;
 
                 if self.is_disk_loaded {
                     let track = &self.tracks[self.current_track];
                     if track.length > 0 {
+                        // Return the byte at the current index.
+                        // In a real Disk II, if Bit 7 isn't 1, the sequencer waits (slips bits).
+                        // Since our nibblized track is already byte-aligned with valid nibbles (MSB=1),
+                        // we just ensure the index advances. 
+                        // The key fix here is making sure latch_valid stays true for the whole window.
                         self.data_latch = track.raw_bytes[self.byte_index];
-                        self.latch_valid_cycles = 32; // Full 32 cycles window
+                        self.latch_valid = true; 
                         self.byte_index = (self.byte_index + 1) % track.length;
                     }
                 }
@@ -223,7 +239,6 @@ impl Disk2 {
         self.cycles_since_last_byte = 0;
         self.data_latch = 0;
         self.latch_valid = false;
-        self.latch_valid_cycles = 0;
         self.phases = [false; 4];
         self.phase_index = 0;
     }
