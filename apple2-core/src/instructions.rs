@@ -271,6 +271,8 @@ impl CPU {
     pub(crate) fn rti<M: Memory>(&mut self, mem: &mut M) {
         let p = self.stack_pop(mem);
         self.status.from_byte(p);
+        self.status.b = false; // B flag is not restored from stack (Bug 3)
+        self.status.u = true;  // U flag always 1
         let lo = self.stack_pop(mem) as u16;
         let hi = self.stack_pop(mem) as u16;
         self.pc = (hi << 8) | lo;
@@ -328,6 +330,8 @@ impl CPU {
     pub(crate) fn plp<M: Memory>(&mut self, mem: &mut M) {
         let p = self.stack_pop(mem);
         self.status.from_byte(p);
+        self.status.b = false; // B flag is always false inside CPU (Bug 2)
+        self.status.u = true;  // U flag always 1
     }
 
     // --- Illegal Opcodes ---

@@ -84,21 +84,20 @@ impl CPU {
     }
 
     /// Read a byte from memory and increment PC
-    fn fetch_byte<M: Memory>(&mut self, mem: &mut M) -> u8 {
+    pub(crate) fn fetch_byte<M: Memory>(&mut self, mem: &mut M) -> u8 {
         let result = mem.read(self.pc);
         self.pc = self.pc.wrapping_add(1);
         result
     }
 
     /// Read a word from memory and increment PC by 2
-    fn fetch_word<M: Memory>(&mut self, mem: &mut M) -> u16 {
+    pub(crate) fn fetch_word<M: Memory>(&mut self, mem: &mut M) -> u16 {
         let result = mem.read_word(self.pc);
         self.pc = self.pc.wrapping_add(2);
         result
     }
 
     /// Calculate the target address based on addressing mode
-    /// Returns (address, page_crossed)
     pub(crate) fn get_operand_address<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) -> (u16, bool) {
         match mode {
             AddressingMode::Immediate => {
@@ -128,7 +127,6 @@ impl CPU {
             }
             AddressingMode::Indirect => {
                 let ptr = self.fetch_word(mem);
-                // 6502 bug: if ptr ends in 0xFF, it wraps around the page
                 let lo = mem.read(ptr) as u16;
                 let hi_ptr = if ptr & 0x00FF == 0x00FF { ptr & 0xFF00 } else { ptr + 1 };
                 let hi = mem.read(hi_ptr) as u16;
@@ -149,17 +147,12 @@ impl CPU {
                 let addr = deref_base.wrapping_add(self.y as u16);
                 (addr, (deref_base & 0xFF00) != (addr & 0xFF00))
             }
-            AddressingMode::NoneAddressing => {
-                (0, false)
-            }
-            AddressingMode::Relative => {
-                (0, false)
-            }
+            AddressingMode::NoneAddressing => (0, false),
+            AddressingMode::Relative => (0, false),
         }
     }
 
     /// Step one instruction
-    /// Returns number of cycles consumed
     pub fn step<M: Memory>(&mut self, mem: &mut M) -> u32 {
         let opcode = self.fetch_byte(mem);
         let mut extra_cycles = 0;
@@ -170,7 +163,7 @@ impl CPU {
                 let push_pc = self.pc.wrapping_add(1);
                 self.stack_push(mem, (push_pc >> 8) as u8);
                 self.stack_push(mem, (push_pc & 0xFF) as u8);
-                self.stack_push(mem, self.status.to_byte() | 0x10 | 0x20);
+                self.stack_push(mem, self.status.to_byte() | 0x30);
                 self.status.i = true;
                 self.pc = mem.read_word(0xFFFE);
                 7
@@ -398,12 +391,13 @@ impl CPU {
             0x1A | 0x3A | 0x5A | 0x7A | 0xDA | 0xFA => { 2 } 
 
             // LAX (Illegal: Load A and X)
-            0xAF => { let (addr, p) = self.get_operand_address(mem, AddressingMode::Absolute); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); if p { extra_cycles += 1; } 4 }
+            0xAF => { let (addr, _) = self.get_operand_address(mem, AddressingMode::Absolute); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); 4 }
             0xA7 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPage); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); 3 }
             0xB7 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPageY); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); 4 }
             0xBF => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteY); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); if p { extra_cycles += 1; } 4 }
             0xA3 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectX); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); 6 }
             0xB3 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::IndirectY); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); if p { extra_cycles += 1; } 5 }
+            0xAB => { let val = self.fetch_byte(mem); self.a &= val; self.x = self.a; self.update_zero_and_negative_flags(self.a); 2 } // LAX #imm
 
             // SAX (Illegal: Store A AND X)
             0x8F => { let (addr, _) = self.get_operand_address(mem, AddressingMode::Absolute); mem.write(addr, self.a & self.x); 4 }
@@ -429,14 +423,11 @@ impl CPU {
             0xE3 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectX); self.isc_with_addr(mem, addr); 8 }
             0xF3 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectY); self.isc_with_addr(mem, addr); 8 }
 
-            _ => {
-                2
-            }
+            _ => 2
         };
         cycles + extra_cycles
     }
 
-    // Helper methods for complex illegal opcodes
     fn dcp_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
         let val = mem.read(addr).wrapping_sub(1);
         mem.write(addr, val);

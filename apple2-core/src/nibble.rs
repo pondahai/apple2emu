@@ -54,27 +54,26 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
             
             let mut snib = [0u8; 86];
             let mut pnib = [0u8; 256];
-            let swap = |v: u8| -> u8 { ((v & 1) << 1) | ((v >> 1) & 1) };
 
-            // Standard AppleWin logic for 6-and-2 encoding
-            for i in 0..256 {
-                let raw = sector_data[i];
-                pnib[i] = raw >> 2;
-                let bits = swap(raw & 3);
+            for k in 0..256 {
+                let p = sector_data[k] >> 2;
+                let b = sector_data[k] & 3; 
+                pnib[k] = p;
                 
-                // Incorporate SOff:10 directly into the mapping
-                let s_idx = (i + 10) % 86;
-                if i < 86 {
-                    snib[s_idx] |= bits << 4;
-                } else if i < 172 {
-                    snib[s_idx] |= bits << 2;
+                // Align secondary bits into snib with SOff:10 offset
+                let s_idx = (k + 10) % 86;
+                if k < 86 {
+                    snib[s_idx] |= b << 4;
+                } else if k < 172 {
+                    snib[s_idx] |= b << 2;
                 } else {
-                    snib[s_idx] |= bits;
+                    snib[s_idx] |= b;
                 }
             }
 
             let mut nbuf = [0u8; 342];
-            for i in 0..86 { nbuf[i] = snib[i]; }
+            // Standard Reverse Order for 85..0
+            for i in 0..86 { nbuf[i] = snib[85 - i]; }
             for i in 0..256 { nbuf[86 + i] = pnib[i]; }
 
             let mut last_val = 0u8;
@@ -82,12 +81,12 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
                 let val6 = nbuf[i] & 0x3F;
                 let encoded = val6 ^ last_val;
                 track_out.push(NIBBLE_WRITE_TABLE[encoded as usize]);
-                last_val = val6;
+                last_val = val6; // XOR:0 (Cumulative Raw)
             }
             track_out.push(NIBBLE_WRITE_TABLE[last_val as usize]);
 
             track_out.push(0xDE); track_out.push(0xAA); track_out.push(0xEB);
-            for _ in 0..80 { track_out.push(0xFF); }
+            for _ in 0..40 { track_out.push(0xFF); }
         }
         tracks.push(track_out);
     }

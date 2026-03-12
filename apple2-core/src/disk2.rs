@@ -46,7 +46,7 @@ impl Disk2 {
     }
 
     pub fn read_io(&mut self, addr: u16) -> u8 {
-        // Guard handle_io for $C0EC to avoid redundant state switching during polling
+        // Guard handle_io for $C0EC to avoid redundant state switching
         if addr != 0xC0EC {
             self.handle_io(addr);
         } else {
@@ -55,10 +55,8 @@ impl Disk2 {
 
         if self.motor_on && (addr & 0x01 == 0) {
             if !self.is_disk_loaded { return 0x00; }
-            let val = self.data_latch;
-            // Destructive Read: Clear Ready flag (Bit 7)
-            self.data_latch &= 0x7F; 
-            return val;
+            // Expert: RETURN RAW LATCH, NO destructive read
+            return self.data_latch;
         }
         0x00
     }
@@ -107,7 +105,7 @@ impl Disk2 {
             let nt = (self.current_qtr_track / 4) as usize;
             if self.current_track != nt {
                 self.current_track = nt;
-                self.byte_index = 0; 
+                self.byte_index = 0; // CRITICAL: Reset index on track change
             }
         }
     }
@@ -115,6 +113,7 @@ impl Disk2 {
     pub fn tick(&mut self, cycles: u32) {
         if self.motor_on && self.is_disk_loaded {
             self.cycles_accumulator += cycles;
+            // Byte-synchronized read
             while self.cycles_accumulator >= 32 {
                 self.cycles_accumulator -= 32;
                 let track = &self.tracks[self.current_track];
