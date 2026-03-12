@@ -397,7 +397,7 @@ impl CPU {
             0xBF => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteY); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); if p { extra_cycles += 1; } 4 }
             0xA3 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectX); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); 6 }
             0xB3 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::IndirectY); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); if p { extra_cycles += 1; } 5 }
-            0xAB => { let val = self.fetch_byte(mem); self.a &= val; self.x = self.a; self.update_zero_and_negative_flags(self.a); 2 } // LAX #imm
+            0xAB => { let val = self.fetch_byte(mem); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); 2 } // LAX #imm
 
             // SAX (Illegal: Store A AND X)
             0x8F => { let (addr, _) = self.get_operand_address(mem, AddressingMode::Absolute); mem.write(addr, self.a & self.x); 4 }

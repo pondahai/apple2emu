@@ -46,7 +46,7 @@ impl Disk2 {
     }
 
     pub fn read_io(&mut self, addr: u16) -> u8 {
-        // Guard handle_io for $C0EC to avoid redundant state switching
+        // Expert Suggestion: Guard handle_io for $C0EC to avoid redundant state switching
         if addr != 0xC0EC {
             self.handle_io(addr);
         } else {
