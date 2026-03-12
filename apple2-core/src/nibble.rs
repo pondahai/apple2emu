@@ -51,7 +51,10 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
 
             let vol: u8 = 254;
             let trk: u8 = track_num as u8;
-            let sec: u8 = logical_sector as u8;
+            // FIX 1: sec must be the PHYSICAL sector number (phys_pos),
+            //        NOT the logical sector number.
+            //        RWTS searches for the physical position in the Address Field.
+            let sec: u8 = phys_pos as u8;
             let chk: u8 = vol ^ trk ^ sec;
 
             let encode4x4 = |val: u8| -> (u8, u8) { ((val >> 1) | 0xAA, val | 0xAA) };
@@ -70,9 +73,10 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
 
             // 6-and-2 encoding per "Beneath Apple DOS" Chapter 3
             //
-            // The RWTS decode loop does a bit-swap (bit0<->bit1) on each 2-bit secondary
-            // value when reconstructing the original bytes.  Therefore the encode side
-            // must pre-apply the same swap so the round-trip is correct.
+            // FIX 2: The RWTS decode loop applies a bit-swap (bit0<->bit1) on
+            // each 2-bit secondary value when reconstructing the original bytes.
+            // Therefore the encode side must pre-apply the same swap so the
+            // round-trip is correct.
             //
             // Build secondary nibble buffer (snib, 86 bytes):
             //   group 0: bytes [  0.. 85] -> bit-swapped bits[1:0] at snib[i%86] shift 0
@@ -89,15 +93,17 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
                 snib[idx] |= bits2_swapped << shift;
             }
 
-            // XOR-encode and emit: snib reversed, then primary in order
+            // XOR-encode and emit: snib in reverse, then primary in order
             let mut last_val: u8 = 0;
 
+            // snib reversed: snib[85], snib[84], ..., snib[0]
             for i in 0..86 {
                 let val6 = snib[85 - i] & 0x3F;
                 track_out.push(NIBBLE_WRITE_TABLE[(val6 ^ last_val) as usize]);
                 last_val = val6;
             }
 
+            // primary: upper 6 bits of sector_data[0..255]
             for i in 0..256 {
                 let val6 = sector_data[i] >> 2;
                 track_out.push(NIBBLE_WRITE_TABLE[(val6 ^ last_val) as usize]);
