@@ -14,7 +14,7 @@ impl CPU {
             self.pc = self.pc.wrapping_add(1);
             return val;
         }
-        let addr = self.get_operand_address(mem, mode);
+        let (addr, _) = self.get_operand_address(mem, mode);
         mem.read(addr)
     }
 
@@ -25,9 +25,19 @@ impl CPU {
         self.update_zero_and_negative_flags(self.a);
     }
 
+    pub(crate) fn lda_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
+        self.a = mem.read(addr);
+        self.update_zero_and_negative_flags(self.a);
+    }
+
     pub(crate) fn ldx<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
         let value = self.read_operand(mem, mode);
         self.x = value;
+        self.update_zero_and_negative_flags(self.x);
+    }
+
+    pub(crate) fn ldx_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
+        self.x = mem.read(addr);
         self.update_zero_and_negative_flags(self.x);
     }
 
@@ -37,19 +47,24 @@ impl CPU {
         self.update_zero_and_negative_flags(self.y);
     }
 
+    pub(crate) fn ldy_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
+        self.y = mem.read(addr);
+        self.update_zero_and_negative_flags(self.y);
+    }
+
     // --- Stores ---
     pub(crate) fn sta<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        let addr = self.get_operand_address(mem, mode);
+        let (addr, _) = self.get_operand_address(mem, mode);
         mem.write(addr, self.a);
     }
 
     pub(crate) fn stx<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        let addr = self.get_operand_address(mem, mode);
+        let (addr, _) = self.get_operand_address(mem, mode);
         mem.write(addr, self.x);
     }
 
     pub(crate) fn sty<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        let addr = self.get_operand_address(mem, mode);
+        let (addr, _) = self.get_operand_address(mem, mode);
         mem.write(addr, self.y);
     }
 
@@ -80,14 +95,20 @@ impl CPU {
 
     // --- Jumps / Branches ---
     pub(crate) fn jmp<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        self.pc = self.get_operand_address(mem, mode);
+        let (addr, _) = self.get_operand_address(mem, mode);
+        self.pc = addr;
     }
 
-    pub(crate) fn branch(&mut self, condition: bool, offset: i8) {
+    pub(crate) fn branch(&mut self, condition: bool, offset: i8) -> u32 {
         if condition {
+            let old_pc = self.pc;
             self.pc = self.pc.wrapping_add(offset as u16);
-            // In a cycle-accurate emulator we would add cycles here
+            if (old_pc & 0xFF00) != (self.pc & 0xFF00) {
+                return 2; // +1 for branch taken, +1 for page cross
+            }
+            return 1; // +1 for branch taken
         }
+        0
     }
 
     // --- Stack Operations ---
@@ -104,7 +125,15 @@ impl CPU {
     // --- Math & Logical (ALU) ---
     pub(crate) fn adc<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
         let data = self.read_operand(mem, mode);
-        
+        self.adc_internal(data);
+    }
+
+    pub(crate) fn adc_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
+        let data = mem.read(addr);
+        self.adc_internal(data);
+    }
+
+    fn adc_internal(&mut self, data: u8) {
         if self.status.d {
             // Decimal Mode ADC
             let mut lower = (self.a & 0x0F) + (data & 0x0F) + (if self.status.c { 1 } else { 0 });
@@ -134,7 +163,15 @@ impl CPU {
 
     pub(crate) fn sbc<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
         let data = self.read_operand(mem, mode);
-        
+        self.sbc_internal(data);
+    }
+
+    pub(crate) fn sbc_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
+        let data = mem.read(addr);
+        self.sbc_internal(data);
+    }
+
+    fn sbc_internal(&mut self, data: u8) {
         if self.status.d {
             // Decimal Mode SBC
             let diff = self.a as i32 - data as i32 - (if self.status.c { 0 } else { 1 }) as i32;
@@ -167,17 +204,35 @@ impl CPU {
     }
 
     pub(crate) fn and<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        self.a &= self.read_operand(mem, mode);
+        let data = self.read_operand(mem, mode);
+        self.a &= data;
+        self.update_zero_and_negative_flags(self.a);
+    }
+
+    pub(crate) fn and_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
+        self.a &= mem.read(addr);
         self.update_zero_and_negative_flags(self.a);
     }
 
     pub(crate) fn eor<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        self.a ^= self.read_operand(mem, mode);
+        let data = self.read_operand(mem, mode);
+        self.a ^= data;
+        self.update_zero_and_negative_flags(self.a);
+    }
+
+    pub(crate) fn eor_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
+        self.a ^= mem.read(addr);
         self.update_zero_and_negative_flags(self.a);
     }
 
     pub(crate) fn ora<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        self.a |= self.read_operand(mem, mode);
+        let data = self.read_operand(mem, mode);
+        self.a |= data;
+        self.update_zero_and_negative_flags(self.a);
+    }
+
+    pub(crate) fn ora_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
+        self.a |= mem.read(addr);
         self.update_zero_and_negative_flags(self.a);
     }
 
@@ -193,6 +248,11 @@ impl CPU {
         self.compare(self.a, value);
     }
 
+    pub(crate) fn cmp_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
+        let value = mem.read(addr);
+        self.compare(self.a, value);
+    }
+
     pub(crate) fn cpx<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
         let value = self.read_operand(mem, mode);
         self.compare(self.x, value);
@@ -205,7 +265,7 @@ impl CPU {
 
     // --- Increments & Decrements ---
     pub(crate) fn inc<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        let addr = self.get_operand_address(mem, mode);
+        let (addr, _) = self.get_operand_address(mem, mode);
         let mut value = mem.read(addr);
         value = value.wrapping_add(1);
         mem.write(addr, value);
@@ -223,7 +283,7 @@ impl CPU {
     }
 
     pub(crate) fn dec<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        let addr = self.get_operand_address(mem, mode);
+        let (addr, _) = self.get_operand_address(mem, mode);
         let mut value = mem.read(addr);
         value = value.wrapping_sub(1);
         mem.write(addr, value);
@@ -248,7 +308,7 @@ impl CPU {
     }
 
     pub(crate) fn asl<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        let addr = self.get_operand_address(mem, mode);
+        let (addr, _) = self.get_operand_address(mem, mode);
         let mut data = mem.read(addr);
         self.status.c = (data >> 7) == 1;
         data <<= 1;
@@ -263,7 +323,7 @@ impl CPU {
     }
 
     pub(crate) fn lsr<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        let addr = self.get_operand_address(mem, mode);
+        let (addr, _) = self.get_operand_address(mem, mode);
         let mut data = mem.read(addr);
         self.status.c = (data & 1) == 1;
         data >>= 1;
@@ -280,7 +340,7 @@ impl CPU {
     }
 
     pub(crate) fn rol<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        let addr = self.get_operand_address(mem, mode);
+        let (addr, _) = self.get_operand_address(mem, mode);
         let mut data = mem.read(addr);
         let carry_in = if self.status.c { 1 } else { 0 };
         self.status.c = (data >> 7) == 1;
@@ -298,7 +358,7 @@ impl CPU {
     }
 
     pub(crate) fn ror<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        let addr = self.get_operand_address(mem, mode);
+        let (addr, _) = self.get_operand_address(mem, mode);
         let mut data = mem.read(addr);
         let carry_in = if self.status.c { 0x80 } else { 0 };
         self.status.c = (data & 1) == 1;
@@ -318,7 +378,7 @@ impl CPU {
     // --- Subroutines & Interrupts ---
     pub(crate) fn jsr<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
         // JSR fetches the absolute address, but pushes PC + 2 to stack
-        let addr = self.get_operand_address(mem, mode);
+        let (addr, _) = self.get_operand_address(mem, mode);
         // At this point, PC points to the next instruction because get_operand_address(Absolute) increments PC by 2
         // JSR pushes PC - 1
         let ret_addr = self.pc.wrapping_sub(1);

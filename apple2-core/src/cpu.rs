@@ -98,30 +98,33 @@ impl CPU {
     }
 
     /// Calculate the target address based on addressing mode
-    pub(crate) fn get_operand_address<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) -> u16 {
+    /// Returns (address, page_crossed)
+    pub(crate) fn get_operand_address<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) -> (u16, bool) {
         match mode {
             AddressingMode::Immediate => {
                 let addr = self.pc;
                 self.pc = self.pc.wrapping_add(1);
-                addr
+                (addr, false)
             }
-            AddressingMode::ZeroPage => self.fetch_byte(mem) as u16,
+            AddressingMode::ZeroPage => (self.fetch_byte(mem) as u16, false),
             AddressingMode::ZeroPageX => {
                 let base = self.fetch_byte(mem);
-                base.wrapping_add(self.x) as u16
+                (base.wrapping_add(self.x) as u16, false)
             }
             AddressingMode::ZeroPageY => {
                 let base = self.fetch_byte(mem);
-                base.wrapping_add(self.y) as u16
+                (base.wrapping_add(self.y) as u16, false)
             }
-            AddressingMode::Absolute => self.fetch_word(mem),
+            AddressingMode::Absolute => (self.fetch_word(mem), false),
             AddressingMode::AbsoluteX => {
                 let base = self.fetch_word(mem);
-                base.wrapping_add(self.x as u16)
+                let addr = base.wrapping_add(self.x as u16);
+                (addr, (base & 0xFF00) != (addr & 0xFF00))
             }
             AddressingMode::AbsoluteY => {
                 let base = self.fetch_word(mem);
-                base.wrapping_add(self.y as u16)
+                let addr = base.wrapping_add(self.y as u16);
+                (addr, (base & 0xFF00) != (addr & 0xFF00))
             }
             AddressingMode::Indirect => {
                 let ptr = self.fetch_word(mem);
@@ -129,28 +132,28 @@ impl CPU {
                 let lo = mem.read(ptr) as u16;
                 let hi_ptr = if ptr & 0x00FF == 0x00FF { ptr & 0xFF00 } else { ptr + 1 };
                 let hi = mem.read(hi_ptr) as u16;
-                (hi << 8) | lo
+                ((hi << 8) | lo, false)
             }
             AddressingMode::IndirectX => {
                 let base = self.fetch_byte(mem);
                 let ptr = base.wrapping_add(self.x);
                 let lo = mem.read(ptr as u16) as u16;
                 let hi = mem.read(ptr.wrapping_add(1) as u16) as u16;
-                (hi << 8) | lo
+                ((hi << 8) | lo, false)
             }
             AddressingMode::IndirectY => {
                 let base = self.fetch_byte(mem);
                 let lo = mem.read(base as u16) as u16;
                 let hi = mem.read(base.wrapping_add(1) as u16) as u16;
                 let deref_base = (hi << 8) | lo;
-                deref_base.wrapping_add(self.y as u16)
+                let addr = deref_base.wrapping_add(self.y as u16);
+                (addr, (deref_base & 0xFF00) != (addr & 0xFF00))
             }
             AddressingMode::NoneAddressing => {
-                0
+                (0, false)
             }
             AddressingMode::Relative => {
-                // Relative fetch handled differently by branch instructions directly for speed
-                0
+                (0, false)
             }
         }
     }
@@ -159,6 +162,8 @@ impl CPU {
     /// Returns number of cycles consumed
     pub fn step<M: Memory>(&mut self, mem: &mut M) -> u32 {
         let opcode = self.fetch_byte(mem);
+        let mut extra_cycles = 0;
+
         let cycles = match opcode {
             // BRK
             0x00 => {
@@ -176,24 +181,24 @@ impl CPU {
             0xA5 => { self.lda(mem, AddressingMode::ZeroPage); 3 }
             0xB5 => { self.lda(mem, AddressingMode::ZeroPageX); 4 }
             0xAD => { self.lda(mem, AddressingMode::Absolute); 4 }
-            0xBD => { self.lda(mem, AddressingMode::AbsoluteX); 4 } 
-            0xB9 => { self.lda(mem, AddressingMode::AbsoluteY); 4 }
+            0xBD => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteX); self.lda_with_addr(mem, addr); if p { extra_cycles += 1; } 4 } 
+            0xB9 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteY); self.lda_with_addr(mem, addr); if p { extra_cycles += 1; } 4 }
             0xA1 => { self.lda(mem, AddressingMode::IndirectX); 6 }
-            0xB1 => { self.lda(mem, AddressingMode::IndirectY); 5 }
+            0xB1 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::IndirectY); self.lda_with_addr(mem, addr); if p { extra_cycles += 1; } 5 }
 
             // LDX
             0xA2 => { self.ldx(mem, AddressingMode::Immediate); 2 }
             0xA6 => { self.ldx(mem, AddressingMode::ZeroPage); 3 }
             0xB6 => { self.ldx(mem, AddressingMode::ZeroPageY); 4 }
             0xAE => { self.ldx(mem, AddressingMode::Absolute); 4 }
-            0xBE => { self.ldx(mem, AddressingMode::AbsoluteY); 4 }
+            0xBE => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteY); self.ldx_with_addr(mem, addr); if p { extra_cycles += 1; } 4 }
 
             // LDY
             0xA0 => { self.ldy(mem, AddressingMode::Immediate); 2 }
             0xA4 => { self.ldy(mem, AddressingMode::ZeroPage); 3 }
             0xB4 => { self.ldy(mem, AddressingMode::ZeroPageX); 4 }
             0xAC => { self.ldy(mem, AddressingMode::Absolute); 4 }
-            0xBC => { self.ldy(mem, AddressingMode::AbsoluteX); 4 }
+            0xBC => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteX); self.ldy_with_addr(mem, addr); if p { extra_cycles += 1; } 4 }
 
             // STA
             0x85 => { self.sta(mem, AddressingMode::ZeroPage); 3 }
@@ -224,14 +229,14 @@ impl CPU {
             0x40 => { self.rti(mem); 6 }
 
             // Branches
-            0x90 => { let off = self.fetch_byte(mem) as i8; let c = !self.status.c; self.branch(c, off); if c { 3 } else { 2 } }, // BCC
-            0xB0 => { let off = self.fetch_byte(mem) as i8; let c = self.status.c; self.branch(c, off); if c { 3 } else { 2 } },  // BCS
-            0xF0 => { let off = self.fetch_byte(mem) as i8; let c = self.status.z; self.branch(c, off); if c { 3 } else { 2 } },  // BEQ
-            0xD0 => { let off = self.fetch_byte(mem) as i8; let c = !self.status.z; self.branch(c, off); if c { 3 } else { 2 } }, // BNE
-            0x10 => { let off = self.fetch_byte(mem) as i8; let c = !self.status.n; self.branch(c, off); if c { 3 } else { 2 } }, // BPL
-            0x30 => { let off = self.fetch_byte(mem) as i8; let c = self.status.n; self.branch(c, off); if c { 3 } else { 2 } },  // BMI
-            0x50 => { let off = self.fetch_byte(mem) as i8; let c = !self.status.v; self.branch(c, off); if c { 3 } else { 2 } }, // BVC
-            0x70 => { let off = self.fetch_byte(mem) as i8; let c = self.status.v; self.branch(c, off); if c { 3 } else { 2 } },  // BVS
+            0x90 => { let off = self.fetch_byte(mem) as i8; let c = !self.status.c; extra_cycles = self.branch(c, off); if c { 3 } else { 2 } }, // BCC
+            0xB0 => { let off = self.fetch_byte(mem) as i8; let c = self.status.c; extra_cycles = self.branch(c, off); if c { 3 } else { 2 } },  // BCS
+            0xF0 => { let off = self.fetch_byte(mem) as i8; let c = self.status.z; extra_cycles = self.branch(c, off); if c { 3 } else { 2 } },  // BEQ
+            0xD0 => { let off = self.fetch_byte(mem) as i8; let c = !self.status.z; extra_cycles = self.branch(c, off); if c { 3 } else { 2 } }, // BNE
+            0x10 => { let off = self.fetch_byte(mem) as i8; let c = !self.status.n; extra_cycles = self.branch(c, off); if c { 3 } else { 2 } }, // BPL
+            0x30 => { let off = self.fetch_byte(mem) as i8; let c = self.status.n; extra_cycles = self.branch(c, off); if c { 3 } else { 2 } },  // BMI
+            0x50 => { let off = self.fetch_byte(mem) as i8; let c = !self.status.v; extra_cycles = self.branch(c, off); if c { 3 } else { 2 } }, // BVC
+            0x70 => { let off = self.fetch_byte(mem) as i8; let c = self.status.v; extra_cycles = self.branch(c, off); if c { 3 } else { 2 } },  // BVS
 
             // NOP
             0xEA => { self.nop(); 2 }
@@ -241,50 +246,50 @@ impl CPU {
             0x65 => { self.adc(mem, AddressingMode::ZeroPage); 3 }
             0x75 => { self.adc(mem, AddressingMode::ZeroPageX); 4 }
             0x6D => { self.adc(mem, AddressingMode::Absolute); 4 }
-            0x7D => { self.adc(mem, AddressingMode::AbsoluteX); 4 }
-            0x79 => { self.adc(mem, AddressingMode::AbsoluteY); 4 }
+            0x7D => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteX); self.adc_with_addr(mem, addr); if p { extra_cycles += 1; } 4 }
+            0x79 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteY); self.adc_with_addr(mem, addr); if p { extra_cycles += 1; } 4 }
             0x61 => { self.adc(mem, AddressingMode::IndirectX); 6 }
-            0x71 => { self.adc(mem, AddressingMode::IndirectY); 5 }
+            0x71 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::IndirectY); self.adc_with_addr(mem, addr); if p { extra_cycles += 1; } 5 }
 
             // Math: SBC
             0xE9 => { self.sbc(mem, AddressingMode::Immediate); 2 }
             0xE5 => { self.sbc(mem, AddressingMode::ZeroPage); 3 }
             0xF5 => { self.sbc(mem, AddressingMode::ZeroPageX); 4 }
             0xED => { self.sbc(mem, AddressingMode::Absolute); 4 }
-            0xFD => { self.sbc(mem, AddressingMode::AbsoluteX); 4 }
-            0xF9 => { self.sbc(mem, AddressingMode::AbsoluteY); 4 }
+            0xFD => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteX); self.sbc_with_addr(mem, addr); if p { extra_cycles += 1; } 4 }
+            0xF9 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteY); self.sbc_with_addr(mem, addr); if p { extra_cycles += 1; } 4 }
             0xE1 => { self.sbc(mem, AddressingMode::IndirectX); 6 }
-            0xF1 => { self.sbc(mem, AddressingMode::IndirectY); 5 }
+            0xF1 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::IndirectY); self.sbc_with_addr(mem, addr); if p { extra_cycles += 1; } 5 }
 
             // Logic: AND
             0x29 => { self.and(mem, AddressingMode::Immediate); 2 }
             0x25 => { self.and(mem, AddressingMode::ZeroPage); 3 }
             0x35 => { self.and(mem, AddressingMode::ZeroPageX); 4 }
             0x2D => { self.and(mem, AddressingMode::Absolute); 4 }
-            0x3D => { self.and(mem, AddressingMode::AbsoluteX); 4 }
-            0x39 => { self.and(mem, AddressingMode::AbsoluteY); 4 }
+            0x3D => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteX); self.and_with_addr(mem, addr); if p { extra_cycles += 1; } 4 }
+            0x39 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteY); self.and_with_addr(mem, addr); if p { extra_cycles += 1; } 4 }
             0x21 => { self.and(mem, AddressingMode::IndirectX); 6 }
-            0x31 => { self.and(mem, AddressingMode::IndirectY); 5 }
+            0x31 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::IndirectY); self.and_with_addr(mem, addr); if p { extra_cycles += 1; } 5 }
 
             // Logic: ORA
             0x09 => { self.ora(mem, AddressingMode::Immediate); 2 }
             0x05 => { self.ora(mem, AddressingMode::ZeroPage); 3 }
             0x15 => { self.ora(mem, AddressingMode::ZeroPageX); 4 }
             0x0D => { self.ora(mem, AddressingMode::Absolute); 4 }
-            0x1D => { self.ora(mem, AddressingMode::AbsoluteX); 4 }
-            0x19 => { self.ora(mem, AddressingMode::AbsoluteY); 4 }
+            0x1D => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteX); self.ora_with_addr(mem, addr); if p { extra_cycles += 1; } 4 }
+            0x19 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteY); self.ora_with_addr(mem, addr); if p { extra_cycles += 1; } 4 }
             0x01 => { self.ora(mem, AddressingMode::IndirectX); 6 }
-            0x11 => { self.ora(mem, AddressingMode::IndirectY); 5 }
+            0x11 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::IndirectY); self.ora_with_addr(mem, addr); if p { extra_cycles += 1; } 5 }
 
             // Logic: EOR
             0x49 => { self.eor(mem, AddressingMode::Immediate); 2 }
             0x45 => { self.eor(mem, AddressingMode::ZeroPage); 3 }
             0x55 => { self.eor(mem, AddressingMode::ZeroPageX); 4 }
             0x4D => { self.eor(mem, AddressingMode::Absolute); 4 }
-            0x5D => { self.eor(mem, AddressingMode::AbsoluteX); 4 }
-            0x59 => { self.eor(mem, AddressingMode::AbsoluteY); 4 }
+            0x5D => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteX); self.eor_with_addr(mem, addr); if p { extra_cycles += 1; } 4 }
+            0x59 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteY); self.eor_with_addr(mem, addr); if p { extra_cycles += 1; } 4 }
             0x41 => { self.eor(mem, AddressingMode::IndirectX); 6 }
-            0x51 => { self.eor(mem, AddressingMode::IndirectY); 5 }
+            0x51 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::IndirectY); self.eor_with_addr(mem, addr); if p { extra_cycles += 1; } 5 }
 
             // BIT
             0x24 => { self.bit(mem, AddressingMode::ZeroPage); 3 }
@@ -295,10 +300,10 @@ impl CPU {
             0xC5 => { self.cmp(mem, AddressingMode::ZeroPage); 3 }
             0xD5 => { self.cmp(mem, AddressingMode::ZeroPageX); 4 }
             0xCD => { self.cmp(mem, AddressingMode::Absolute); 4 }
-            0xDD => { self.cmp(mem, AddressingMode::AbsoluteX); 4 }
-            0xD9 => { self.cmp(mem, AddressingMode::AbsoluteY); 4 }
+            0xDD => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteX); self.cmp_with_addr(mem, addr); if p { extra_cycles += 1; } 4 }
+            0xD9 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteY); self.cmp_with_addr(mem, addr); if p { extra_cycles += 1; } 4 }
             0xC1 => { self.cmp(mem, AddressingMode::IndirectX); 6 }
-            0xD1 => { self.cmp(mem, AddressingMode::IndirectY); 5 }
+            0xD1 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::IndirectY); self.cmp_with_addr(mem, addr); if p { extra_cycles += 1; } 5 }
 
             // Compares: CPX
             0xE0 => { self.cpx(mem, AddressingMode::Immediate); 2 }
@@ -377,12 +382,19 @@ impl CPU {
             0xD8 => { self.cld(); 2 }
             0xF8 => { self.sed(); 2 }
 
+            // Common Illegal Opcodes (treated as NOPs/Timing fillers)
+            0x04 | 0x44 | 0x64 => { self.fetch_byte(mem); 3 } // 2-byte NOPs
+            0x80 | 0x82 | 0x89 | 0xC2 | 0xE2 => { self.fetch_byte(mem); 2 } // 2-byte NOPs
+            0x03 | 0x07 | 0x0B | 0x0F | 0x13 | 0x17 | 0x1B | 0x1F => { 2 } // 1-byte variants
+            0xDA | 0xFA => { 2 } // 1-byte NOPs
+
             _ => {
-                println!("CPU: Unimplemented opcode {:02X} at {:04X}", opcode, self.pc.wrapping_sub(1));
-                4
+                // If it's truly unknown, still don't crash, just log and treat as 1-byte NOP
+                // println!("CPU: Unknown opcode {:02X} at {:04X}", opcode, self.pc.wrapping_sub(1));
+                2
             }
         };
-        cycles
+        cycles + extra_cycles
     }
 }
 

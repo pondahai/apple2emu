@@ -1,5 +1,5 @@
 use crate::cpu::CPU;
-use crate::memory::Apple2Memory;
+use crate::memory::{Apple2Memory, Memory};
 
 pub struct Apple2Machine {
     pub cpu: CPU,
@@ -22,8 +22,6 @@ impl Apple2Machine {
         self.cpu.reset(&mut *self.mem);
     }
 
-    /// Run the machine for a specified number of CPU cycles / instructions
-    /// Returns the number of cycles used
     pub fn step(&mut self) -> u32 {
         let cycles = self.cpu.step(&mut *self.mem);
         self.mem.disk2.tick(cycles);

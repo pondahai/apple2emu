@@ -317,10 +317,10 @@ fn main() {
         unsafe {
             FRAME_COUNT += 1;
             if FRAME_COUNT % 60 == 0 {
-                println!("Disk Status: Track={}, ByteIndex={}, CyclesSinceByte={}",
+                println!("Disk Status: Track={}, ByteIndex={}, CyclesAccum={}",
                     machine.mem.disk2.current_track,
                     machine.mem.disk2.byte_index,
-                    machine.mem.disk2.cycles_since_last_byte);
+                    machine.mem.disk2.cycles_accumulator);
                 println!("Memory at $0800: {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
                     machine.mem.read(0x0800), machine.mem.read(0x0801), machine.mem.read(0x0802), machine.mem.read(0x0803),
                     machine.mem.read(0x0804), machine.mem.read(0x0805), machine.mem.read(0x0806), machine.mem.read(0x0807));
