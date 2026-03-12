@@ -1,22 +1,23 @@
-# Apple II Emulator - Tomorrow's Action Plan
+# Apple II Emulator - Task List
 
-## 第一階段：恢復「黃金開機版」(優先級：最高)
-* [ ] **核心時序修正**：
-    * 修改 `instructions.rs`：`PHP` 壓入 0x30，`PLP` 忽略 Bit 4。
-    * 修改 `cpu.rs`：`step` 必須回傳 `cycles + extra` (Page Cross)。
-* [ ] **磁碟編碼修正**：
-    * 修改 `nibble.rs`：針對 P5 ROM 的 `DEY` 特性，將 Secondary Buffer (前 86 bytes) 物理反序寫入。
-    * 確保 XOR 鏈條邏輯：`Disk[i] = Data[i] ^ Data[i-1]`。
-* [ ] **連動與映射**：
-    * 修改 `machine.rs`：補回 `disk2.tick(cycles)`。
-    * 修改 `memory.rs`：確保 `$C600` 映射到 Slot 6 ROM。
+## 第一階段：完美開機 (進行中)
+* [ ] **1-bit 同步校準** (優先級：最高)
+    * 調整 `disk2.rs` 中的 `shift_register` 觸發點，修正 `-1` 偏移問題。
+    * 目標：`Memory at $0800` 顯示 `01 A5 27 C9 09 D0 18 A5`。
+* [x] **位元級磁碟模擬**
+    * 已實作每 4 週期移動 1 位元的移位暫存器。
+    * 已達成自動對準同步位元 ($FF)。
+* [x] **核心時序修正**
+    * 已實作 Page Cross Penalty。
+    * 已修正 PHP/PLP 旗標。
 
-## 第二階段：功能補強 (開機成功後再動)
-* [ ] **鍵盤符號全對應**：將今天的 `Shift` 映射表完整遷入。
-* [ ] **非法指令安全評估**：只有在 RWTS 穩定後，才考慮加入 `4B` 等指令，且必須確保不是亂碼誤報。
-* [ ] **寫入功能重啟**：從 `DevLog #12` 的持久化 Latch 基礎上，重新設計 `write_io`。
+## 第二階段：功能補強
+* [ ] **磁碟寫入實作**
+    * 根據位元級模擬器重構寫入邏輯。
+* [ ] **鍵盤映射優化**
+    * 完善 Special Keys 處理。
+* [ ] **非法指令評估**
+    * 根據 DOS 3.3 運行需求補全必要的非法指令（如 2-byte NOPs）。
 
-## 硬體參數備忘 (不可變動)
-* 磁碟轉速：32 CPU Cycles / Byte。
-* 磁頭步進：支援 0.25 軌 (current_qtr_track)。
-* 鎖存器行為：`$C0EC` 讀取後不清空 Bit 7。
+## 已知問題備忘
+* 磁頭目前的步進暫時使用簡化模型，未來需評估 0.25 軌的細微時序影響。
