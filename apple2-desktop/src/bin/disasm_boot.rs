@@ -105,7 +105,7 @@ fn decode_6502(opcode: u8) -> (&'static str, &'static str, usize) {
 }
 
 fn main() {
-    let mut f = File::open("../roms/extracted_256_150.bin").unwrap();
+    let mut f = File::open("roms/DISK2.ROM").unwrap();
     let mut rom = [0u8; 256];
     f.read_exact(&mut rom).unwrap();
     disasm(&rom, 0xC600);
