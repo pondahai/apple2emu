@@ -50,34 +50,24 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
 
             track_out.push(0xD5); track_out.push(0xAA); track_out.push(0xAD);
             
-            let mut nbuf = [0u8; 342];
-            let swap = |v: u8| -> u8 { ((v & 1) << 1) | ((v >> 1) & 1) };
-
-            for i in 0..86 {
-                let b0 = sector_data[i];
-                let b1 = if i + 86 < 256 { sector_data[i + 86] } else { 0 };
-                let b2 = if i + 172 < 256 { sector_data[i + 172] } else { 0 };
-                
-                let mut v = 0u8;
-                v |= swap(b0 & 0x03) << 4;
-                v |= swap(b1 & 0x03) << 2;
-                v |= swap(b2 & 0x03) << 0;
-                nbuf[i] = v;
+            let mut snib = [0u8; 86];
+            for i in 0..256 {
+                let bits = ((sector_data[i] & 0x01) << 1) | ((sector_data[i] & 0x02) >> 1);
+                snib[i % 86] |= bits << ((i / 86) * 2);
             }
-            for i in 0..256 { nbuf[86 + i] = sector_data[i] >> 2; }
 
-            // P5 ROM Reversal logic
-            let mut final_nbuf = [0u8; 342];
-            for i in 0..86 { final_nbuf[i] = nbuf[85 - i]; }
-            for i in 86..342 { final_nbuf[i] = nbuf[i]; }
+            let mut nbuf = [0u8; 342];
+            for i in 0..86 { nbuf[i] = snib[85 - i]; }
+            for i in 0..256 { nbuf[86 + i] = sector_data[i] >> 2; }
 
             let mut last_val = 0u8;
             for i in 0..342 {
-                let current_val = final_nbuf[i] & 0x3F;
+                let current_val = nbuf[i] & 0x3F;
                 track_out.push(NIBBLE_WRITE_TABLE[(current_val ^ last_val) as usize]);
-                last_val = current_val;
+                last_val = current_val; // This was the successful "yesterday" logic!
             }
             track_out.push(NIBBLE_WRITE_TABLE[last_val as usize]);
+
             track_out.push(0xDE); track_out.push(0xAA); track_out.push(0xEB);
             for _ in 0..40 { track_out.push(0xFF); }
         }

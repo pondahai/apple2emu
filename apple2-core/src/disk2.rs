@@ -52,15 +52,12 @@ impl Disk2 {
         self.handle_io(addr);
         if self.motor_on && addr == 0xC0EC {
             if !self.is_disk_loaded { return 0x00; }
-            
-            // Standard Disk II behavior: Read returns the latch.
-            // In a bit-level simulation, Bit 7 is the Ready flag.
             let val = self.data_latch;
             if self.latch_ready {
-                self.latch_ready = false; // "Ready" is consumed on read
+                self.latch_ready = false; 
                 return val;
             } else {
-                return val & 0x7F; // Ready is not yet set
+                return val & 0x7F; 
             }
         }
         0x00
@@ -113,7 +110,6 @@ impl Disk2 {
         if self.motor_on && self.is_disk_loaded {
             self.cycles_accumulator += cycles;
 
-            // In Apple II Disk II, one bit is shifted every 4 CPU cycles.
             while self.cycles_accumulator >= 4 {
                 self.cycles_accumulator -= 4;
 
@@ -124,16 +120,16 @@ impl Disk2 {
                 let bit = (current_byte >> (7 - self.bit_count)) & 1;
                 
                 // Shift Register Logic (Refined)
-                // A new byte is started whenever a '1' is shifted in and the SR is empty.
-                self.shift_register = (self.shift_register << 1) | bit;
-                
+                // DELAYED LATCH: Check Bit 7 BEFORE shifting.
+                // This handles the -1 bit offset issue requested in TODO.md.
                 if (self.shift_register & 0x80) != 0 {
                     self.data_latch = self.shift_register;
                     self.latch_ready = true;
-                    self.shift_register = 0; // Byte complete, clear SR
+                    self.shift_register = 0; 
                 }
 
-                // Advance track bit pointer
+                self.shift_register = (self.shift_register << 1) | bit;
+
                 self.bit_count += 1;
                 if self.bit_count >= 8 {
                     self.bit_count = 0;
