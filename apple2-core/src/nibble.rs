@@ -38,6 +38,7 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
             let logical_sector = PHYS_TO_LOGICAL[phys_pos];
             let sector_data = &disk_data[track_offset + (logical_sector * 256) .. track_offset + (logical_sector * 256) + 256];
 
+            // Address Field
             track_out.push(0xD5); track_out.push(0xAA); track_out.push(0x96);
             let vol = 254_u8; let trk = track_num as u8; let sec = phys_pos as u8; let chk = vol ^ trk ^ sec;
             let encode4x4 = |val: u8| -> (u8, u8) { ((val >> 1) | 0xAA, val | 0xAA) };
@@ -48,32 +49,45 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
             track_out.push(0xDE); track_out.push(0xAA); track_out.push(0xEB);
             for _ in 0..20 { track_out.push(0xFF); }
 
+            // Data Field
             track_out.push(0xD5); track_out.push(0xAA); track_out.push(0xAD);
             
             let mut snib = [0u8; 86];
+            let mut pnib = [0u8; 256];
             let swap = |v: u8| -> u8 { ((v & 1) << 1) | ((v >> 1) & 1) };
 
+            // Standard AppleWin logic for 6-and-2 encoding
             for i in 0..256 {
-                let bit_idx = i % 86;
-                let group = i / 86; // 0, 1, 2
-                let bits = swap(sector_data[i] & 0x03);
-                snib[bit_idx] |= bits << (group * 2);
+                let raw = sector_data[i];
+                pnib[i] = raw >> 2;
+                let bits = swap(raw & 3);
+                
+                // Incorporate SOff:10 directly into the mapping
+                let s_idx = (i + 10) % 86;
+                if i < 86 {
+                    snib[s_idx] |= bits << 4;
+                } else if i < 172 {
+                    snib[s_idx] |= bits << 2;
+                } else {
+                    snib[s_idx] |= bits;
+                }
             }
 
             let mut nbuf = [0u8; 342];
-            for i in 0..86 { nbuf[i] = snib[85 - i]; }
-            for i in 0..256 { nbuf[86 + i] = sector_data[i] >> 2; }
+            for i in 0..86 { nbuf[i] = snib[i]; }
+            for i in 0..256 { nbuf[86 + i] = pnib[i]; }
 
             let mut last_val = 0u8;
             for i in 0..342 {
-                let current_val = nbuf[i] & 0x3F;
-                track_out.push(NIBBLE_WRITE_TABLE[(current_val ^ last_val) as usize]);
-                last_val = current_val;
+                let val6 = nbuf[i] & 0x3F;
+                let encoded = val6 ^ last_val;
+                track_out.push(NIBBLE_WRITE_TABLE[encoded as usize]);
+                last_val = val6;
             }
             track_out.push(NIBBLE_WRITE_TABLE[last_val as usize]);
 
             track_out.push(0xDE); track_out.push(0xAA); track_out.push(0xEB);
-            for _ in 0..40 { track_out.push(0xFF); }
+            for _ in 0..80 { track_out.push(0xFF); }
         }
         tracks.push(track_out);
     }

@@ -14,9 +14,7 @@ pub struct Disk2 {
     pub phases: [bool; 4],
     pub current_qtr_track: i32,
 
-    // Real Hardware Emulation: Bit-level Shift Register
-    pub shift_register: u8,
-    pub bit_count: u8,
+    // Stable Emulation: Byte-level Sync (~32 cycles per byte)
     pub byte_index: usize,
     pub cycles_accumulator: u32,
     pub data_latch: u8,
@@ -30,7 +28,7 @@ impl Disk2 {
             rom: [0; 256], motor_on: false, drive_select: 1, write_mode: false, load_mode: false,
             current_track: 0, tracks, is_disk_loaded: false, phases: [false; 4],
             current_qtr_track: 0,
-            shift_register: 0, bit_count: 0, byte_index: 0, cycles_accumulator: 0,
+            byte_index: 0, cycles_accumulator: 0,
             data_latch: 0,
         }
     }
@@ -48,11 +46,18 @@ impl Disk2 {
     }
 
     pub fn read_io(&mut self, addr: u16) -> u8 {
-        self.handle_io(addr);
-        if self.motor_on && addr == 0xC0EC {
+        // Guard handle_io for $C0EC to avoid redundant state switching during polling
+        if addr != 0xC0EC {
+            self.handle_io(addr);
+        } else {
+            self.write_mode = false;
+        }
+
+        if self.motor_on && (addr & 0x01 == 0) {
             if !self.is_disk_loaded { return 0x00; }
             let val = self.data_latch;
-            self.data_latch &= 0x7F; // Destructive Read: Clear Ready flag
+            // Destructive Read: Clear Ready flag (Bit 7)
+            self.data_latch &= 0x7F; 
             return val;
         }
         0x00
@@ -61,9 +66,16 @@ impl Disk2 {
     pub fn write_io(&mut self, addr: u16, _data: u8) { self.handle_io(addr); }
 
     fn handle_io(&mut self, addr: u16) {
-        let switch = addr & 0x0F;
+        let switch = (addr & 0x0F) as usize;
         match switch {
-            0x00..=0x07 => { self.phases[(switch >> 1) as usize] = (switch & 1) != 0; self.step_motor(); }
+            0x00..=0x07 => { 
+                let phase = switch >> 1;
+                let on = (switch & 1) != 0;
+                if on != self.phases[phase] {
+                    self.phases[phase] = on; 
+                    self.step_motor(); 
+                }
+            }
             0x08 => self.motor_on = false,
             0x09 => self.motor_on = true,
             0x0A => self.drive_select = 1,
@@ -77,26 +89,25 @@ impl Disk2 {
     }
     
     fn step_motor(&mut self) {
-        let mut sum_target = 0;
-        let mut active_count = 0;
-        for i in 0..4 {
-            if self.phases[i] {
-                let mut target = (i as i32) * 2;
-                while target - self.current_qtr_track > 4 { target -= 8; }
-                while self.current_qtr_track - target > 4 { target += 8; }
-                sum_target += target; active_count += 1;
+        let mut target_qtr = self.current_qtr_track;
+        for p in 0..4 {
+            if self.phases[p] {
+                let p_pos = (p as i32) * 2;
+                let mut diff = p_pos - (target_qtr % 8);
+                if diff > 4 { diff -= 8; }
+                if diff < -4 { diff += 8; }
+                target_qtr += diff;
             }
         }
-        if active_count > 0 {
-            let target = sum_target / active_count;
-            if self.current_qtr_track != target {
-                self.current_qtr_track = target;
-                if self.current_qtr_track < 0 { self.current_qtr_track = 0; }
-                if self.current_qtr_track > 34 * 4 { self.current_qtr_track = 34 * 4; }
-                let nt = (self.current_qtr_track / 4) as usize;
-                if self.current_track != nt {
-                    self.current_track = nt;
-                }
+
+        if target_qtr != self.current_qtr_track {
+            self.current_qtr_track = target_qtr;
+            if self.current_qtr_track < 0 { self.current_qtr_track = 0; }
+            if self.current_qtr_track > 34 * 4 { self.current_qtr_track = 34 * 4; }
+            let nt = (self.current_qtr_track / 4) as usize;
+            if self.current_track != nt {
+                self.current_track = nt;
+                self.byte_index = 0; 
             }
         }
     }
@@ -104,31 +115,11 @@ impl Disk2 {
     pub fn tick(&mut self, cycles: u32) {
         if self.motor_on && self.is_disk_loaded {
             self.cycles_accumulator += cycles;
-
-            while self.cycles_accumulator >= 4 {
-                self.cycles_accumulator -= 4;
-
+            while self.cycles_accumulator >= 32 {
+                self.cycles_accumulator -= 32;
                 let track = &self.tracks[self.current_track];
-                if track.length == 0 { continue; }
-
-                let current_byte = track.raw_bytes[self.byte_index];
-                let bit = (current_byte >> (7 - self.bit_count)) & 1;
-                
-                // Real Hardware Shift Register Logic
-                // If MSB is 1, the shifter is ready.
-                self.shift_register = (self.shift_register << 1) | bit;
-                
-                if (self.shift_register & 0x80) != 0 {
-                    // Update the latch when a byte is completed.
-                    self.data_latch = self.shift_register;
-                    // AUTO-SYNC: Sync bytes (FF) reset the shifter.
-                    self.shift_register = 0; 
-                }
-
-                // Advance track bit pointer
-                self.bit_count += 1;
-                if self.bit_count >= 8 {
-                    self.bit_count = 0;
+                if track.length > 0 {
+                    self.data_latch = track.raw_bytes[self.byte_index];
                     self.byte_index = (self.byte_index + 1) % track.length;
                 }
             }
@@ -137,8 +128,7 @@ impl Disk2 {
 
     pub fn reset(&mut self) {
         self.motor_on = false; self.current_track = 0; self.byte_index = 0;
-        self.bit_count = 0; self.shift_register = 0; self.cycles_accumulator = 0;
-        self.data_latch = 0;
-        self.phases = [false; 4];
+        self.cycles_accumulator = 0; self.data_latch = 0;
+        self.phases = [false; 4]; self.current_qtr_track = 0;
     }
 }

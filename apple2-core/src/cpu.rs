@@ -238,9 +238,6 @@ impl CPU {
             0x50 => { let off = self.fetch_byte(mem) as i8; let c = !self.status.v; extra_cycles = self.branch(c, off); if c { 3 } else { 2 } }, // BVC
             0x70 => { let off = self.fetch_byte(mem) as i8; let c = self.status.v; extra_cycles = self.branch(c, off); if c { 3 } else { 2 } },  // BVS
 
-            // NOP
-            0xEA => { self.nop(); 2 }
-
             // Math: ADC
             0x69 => { self.adc(mem, AddressingMode::Immediate); 2 }
             0x65 => { self.adc(mem, AddressingMode::ZeroPage); 3 }
@@ -382,19 +379,74 @@ impl CPU {
             0xD8 => { self.cld(); 2 }
             0xF8 => { self.sed(); 2 }
 
-            // Common Illegal Opcodes (treated as NOPs/Timing fillers)
-            0x04 | 0x44 | 0x64 => { self.fetch_byte(mem); 3 } // 2-byte NOPs
-            0x80 | 0x82 | 0x89 | 0xC2 | 0xE2 => { self.fetch_byte(mem); 2 } // 2-byte NOPs
-            0x03 | 0x07 | 0x0B | 0x0F | 0x13 | 0x17 | 0x1B | 0x1F => { 2 } // 1-byte variants
-            0xDA | 0xFA => { 2 } // 1-byte NOPs
+            // NOP
+            0xEA => { self.nop(); 2 }
+            // 2-byte NOPs (SKB: Skip Byte)
+            0x04 | 0x44 | 0x64 | 0x80 | 0x82 | 0x89 | 0xC2 | 0xE2 => { self.fetch_byte(mem); 3 } 
+            // 3-byte NOPs (SKW: Skip Word)
+            0x0C => { let addr = self.fetch_word(mem); mem.read(addr); 4 }
+            // Indexed 2-byte NOPs (Zero Page,X)
+            0x14 | 0x34 | 0x54 | 0x74 | 0xD4 | 0xF4 => { let b = self.fetch_byte(mem); mem.read(b.wrapping_add(self.x) as u16); 4 }
+            // Indexed 3-byte NOPs (Absolute,X)
+            0x1C | 0x3C | 0x5C | 0x7C | 0xDC | 0xFC => { 
+                let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteX);
+                mem.read(addr);
+                if p { extra_cycles += 1; }
+                4
+            }
+            // 1-byte variants
+            0x1A | 0x3A | 0x5A | 0x7A | 0xDA | 0xFA => { 2 } 
+
+            // LAX (Illegal: Load A and X)
+            0xAF => { let (addr, p) = self.get_operand_address(mem, AddressingMode::Absolute); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); if p { extra_cycles += 1; } 4 }
+            0xA7 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPage); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); 3 }
+            0xB7 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPageY); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); 4 }
+            0xBF => { let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteY); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); if p { extra_cycles += 1; } 4 }
+            0xA3 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectX); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); 6 }
+            0xB3 => { let (addr, p) = self.get_operand_address(mem, AddressingMode::IndirectY); let val = mem.read(addr); self.a = val; self.x = val; self.update_zero_and_negative_flags(val); if p { extra_cycles += 1; } 5 }
+
+            // SAX (Illegal: Store A AND X)
+            0x8F => { let (addr, _) = self.get_operand_address(mem, AddressingMode::Absolute); mem.write(addr, self.a & self.x); 4 }
+            0x87 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPage); mem.write(addr, self.a & self.x); 3 }
+            0x97 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPageY); mem.write(addr, self.a & self.x); 4 }
+            0x83 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectX); mem.write(addr, self.a & self.x); 6 }
+
+            // DCP (Illegal: DEC then CMP)
+            0xCF => { let (addr, _) = self.get_operand_address(mem, AddressingMode::Absolute); self.dcp_with_addr(mem, addr); 6 }
+            0xC7 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPage); self.dcp_with_addr(mem, addr); 5 }
+            0xD7 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPageX); self.dcp_with_addr(mem, addr); 6 }
+            0xDF => { let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteX); self.dcp_with_addr(mem, addr); 7 }
+            0xDB => { let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteY); self.dcp_with_addr(mem, addr); 7 }
+            0xC3 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectX); self.dcp_with_addr(mem, addr); 8 }
+            0xD3 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectY); self.dcp_with_addr(mem, addr); 8 }
+
+            // ISC (Illegal: INC then SBC)
+            0xEF => { let (addr, _) = self.get_operand_address(mem, AddressingMode::Absolute); self.isc_with_addr(mem, addr); 6 }
+            0xE7 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPage); self.isc_with_addr(mem, addr); 5 }
+            0xF7 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPageX); self.isc_with_addr(mem, addr); 6 }
+            0xFF => { let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteX); self.isc_with_addr(mem, addr); 7 }
+            0xFB => { let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteY); self.isc_with_addr(mem, addr); 7 }
+            0xE3 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectX); self.isc_with_addr(mem, addr); 8 }
+            0xF3 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectY); self.isc_with_addr(mem, addr); 8 }
 
             _ => {
-                // If it's truly unknown, still don't crash, just log and treat as 1-byte NOP
-                // println!("CPU: Unknown opcode {:02X} at {:04X}", opcode, self.pc.wrapping_sub(1));
                 2
             }
         };
         cycles + extra_cycles
+    }
+
+    // Helper methods for complex illegal opcodes
+    fn dcp_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
+        let val = mem.read(addr).wrapping_sub(1);
+        mem.write(addr, val);
+        self.compare(self.a, val);
+    }
+
+    fn isc_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
+        let val = mem.read(addr).wrapping_add(1);
+        mem.write(addr, val);
+        self.adc_with_val(!val);
     }
 }
 
@@ -412,4 +464,3 @@ pub enum AddressingMode {
     NoneAddressing,
     Relative,
 }
-

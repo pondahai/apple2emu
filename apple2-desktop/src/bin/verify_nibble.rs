@@ -1,8 +1,8 @@
 use apple2_core::nibble::{NIBBLE_WRITE_TABLE};
 
 fn main() {
-    let dsk_path = "../roms/MASTER.DSK";
-    let disk_data = std::fs::read(dsk_path).expect("Cannot read MASTER.DSK");
+    let dsk_path = "roms/MASTER.DSK";
+    let disk_data = std::fs::read(dsk_path).expect("Cannot read roms/MASTER.DSK");
     let mut gcr_decode = [0xFFu8; 256];
     for (i, &gcr) in NIBBLE_WRITE_TABLE.iter().enumerate() { gcr_decode[gcr as usize] = i as u8; }
 
