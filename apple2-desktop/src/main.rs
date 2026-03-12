@@ -204,12 +204,16 @@ fn main() {
             if FRAME_COUNT % 60 == 0 {
                 let mut row_data = String::new();
                 for i in 0..32 { row_data.push_str(&format!("{:02X} ", machine.mem.read(0x0800 + i))); }
-                let mut b000_data = String::new();
-                for i in 0..32 { b000_data.push_str(&format!("{:02X} ", machine.mem.read(0x0BB0 + i))); }
+                let mut vec_data = String::new();
+                for i in 0..32 { vec_data.push_str(&format!("{:02X} ", machine.mem.read(0x03D0 + i))); }
+                let mut buf_data = String::new();
+                for i in 0..16 { buf_data.push_str(&format!("{:02X} ", machine.mem.read(0x0200 + i))); }
+                
                 println!("Disk: T{} Index={} Latch={:02X}", 
                     machine.mem.disk2.current_track, machine.mem.disk2.byte_index, machine.mem.disk2.data_latch);
                 println!("Memory at $0800: {}", row_data);
-                println!("Memory at $0BB0: {}", b000_data);
+                println!("Vectors at $03D0: {}", vec_data);
+                println!("Buffer at $0200: {}", buf_data);
                 println!("CPU PC: {:04X} A:{:02X} X:{:02X} Y:{:02X} S:{:02X} P:{:02X}", 
                     machine.cpu.pc, machine.cpu.a, machine.cpu.x, machine.cpu.y, machine.cpu.sp, 
                     machine.cpu.status.to_byte());

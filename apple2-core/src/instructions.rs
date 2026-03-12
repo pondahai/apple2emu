@@ -333,37 +333,4 @@ impl CPU {
         self.status.b = false; // B flag is always false inside CPU (Bug 2)
         self.status.u = true;  // U flag always 1
     }
-
-    // --- Illegal Opcodes ---
-    pub(crate) fn lax<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        let value = self.read_operand(mem, mode);
-        self.a = value;
-        self.x = value;
-        self.update_zero_and_negative_flags(value);
-    }
-
-    pub(crate) fn lax_with_addr(&mut self, val: u8) {
-        self.a = val;
-        self.x = val;
-        self.update_zero_and_negative_flags(val);
-    }
-
-    pub(crate) fn sax<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        let (addr, _) = self.get_operand_address(mem, mode);
-        mem.write(addr, self.a & self.x);
-    }
-
-    pub(crate) fn dcp<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        let (addr, _) = self.get_operand_address(mem, mode);
-        let value = mem.read(addr).wrapping_sub(1);
-        mem.write(addr, value);
-        self.compare(self.a, value);
-    }
-
-    pub(crate) fn isc<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
-        let (addr, _) = self.get_operand_address(mem, mode);
-        let value = mem.read(addr).wrapping_add(1);
-        mem.write(addr, value);
-        self.adc_with_val(!value);
-    }
 }
