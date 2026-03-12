@@ -1,9 +1,9 @@
 # Apple II Emulator - Task List
 
 ## 第一階段：完美開機 (進行中)
-* [ ] **1-bit 同步校準** (優先級：最高)
-    * 調整 `disk2.rs` 中的 `shift_register` 觸發點，修正 `-1` 偏移問題。
-    * 目標：`Memory at $0800` 顯示 `01 A5 27 C9 09 D0 18 A5`。
+* [x] **1-bit 同步校準** (已完成)
+    * 已透過 bit-swap 與 destructive read 修正 `02` vs `01` 偏移。
+    * 目標：`Memory at $0800` 顯示 `01 A5 27 C9` 已達成。
 * [x] **位元級磁碟模擬**
     * 已實作每 4 週期移動 1 位元的移位暫存器。
     * 已達成自動對準同步位元 ($FF)。

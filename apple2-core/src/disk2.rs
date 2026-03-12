@@ -20,7 +20,6 @@ pub struct Disk2 {
     pub byte_index: usize,
     pub cycles_accumulator: u32,
     pub data_latch: u8,
-    pub latch_ready: bool,
 }
 
 impl Disk2 {
@@ -32,7 +31,7 @@ impl Disk2 {
             current_track: 0, tracks, is_disk_loaded: false, phases: [false; 4],
             current_qtr_track: 0,
             shift_register: 0, bit_count: 0, byte_index: 0, cycles_accumulator: 0,
-            data_latch: 0, latch_ready: false,
+            data_latch: 0,
         }
     }
 
@@ -53,12 +52,8 @@ impl Disk2 {
         if self.motor_on && addr == 0xC0EC {
             if !self.is_disk_loaded { return 0x00; }
             let val = self.data_latch;
-            if self.latch_ready {
-                self.latch_ready = false; 
-                return val;
-            } else {
-                return val & 0x7F; 
-            }
+            self.data_latch &= 0x7F; // Destructive Read: Clear Ready flag
+            return val;
         }
         0x00
     }
@@ -119,17 +114,18 @@ impl Disk2 {
                 let current_byte = track.raw_bytes[self.byte_index];
                 let bit = (current_byte >> (7 - self.bit_count)) & 1;
                 
-                // Shift Register Logic (Refined)
-                // DELAYED LATCH: Check Bit 7 BEFORE shifting.
-                // This handles the -1 bit offset issue requested in TODO.md.
+                // Real Hardware Shift Register Logic
+                // If MSB is 1, the shifter is ready.
+                self.shift_register = (self.shift_register << 1) | bit;
+                
                 if (self.shift_register & 0x80) != 0 {
+                    // Update the latch when a byte is completed.
                     self.data_latch = self.shift_register;
-                    self.latch_ready = true;
+                    // AUTO-SYNC: Sync bytes (FF) reset the shifter.
                     self.shift_register = 0; 
                 }
 
-                self.shift_register = (self.shift_register << 1) | bit;
-
+                // Advance track bit pointer
                 self.bit_count += 1;
                 if self.bit_count >= 8 {
                     self.bit_count = 0;
@@ -142,7 +138,7 @@ impl Disk2 {
     pub fn reset(&mut self) {
         self.motor_on = false; self.current_track = 0; self.byte_index = 0;
         self.bit_count = 0; self.shift_register = 0; self.cycles_accumulator = 0;
-        self.data_latch = 0; self.latch_ready = false;
+        self.data_latch = 0;
         self.phases = [false; 4];
     }
 }

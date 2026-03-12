@@ -51,9 +51,13 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
             track_out.push(0xD5); track_out.push(0xAA); track_out.push(0xAD);
             
             let mut snib = [0u8; 86];
+            let swap = |v: u8| -> u8 { ((v & 1) << 1) | ((v >> 1) & 1) };
+
             for i in 0..256 {
-                let bits = ((sector_data[i] & 0x01) << 1) | ((sector_data[i] & 0x02) >> 1);
-                snib[i % 86] |= bits << ((i / 86) * 2);
+                let bit_idx = i % 86;
+                let group = i / 86; // 0, 1, 2
+                let bits = swap(sector_data[i] & 0x03);
+                snib[bit_idx] |= bits << (group * 2);
             }
 
             let mut nbuf = [0u8; 342];
@@ -64,7 +68,7 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
             for i in 0..342 {
                 let current_val = nbuf[i] & 0x3F;
                 track_out.push(NIBBLE_WRITE_TABLE[(current_val ^ last_val) as usize]);
-                last_val = current_val; // This was the successful "yesterday" logic!
+                last_val = current_val;
             }
             track_out.push(NIBBLE_WRITE_TABLE[last_val as usize]);
 

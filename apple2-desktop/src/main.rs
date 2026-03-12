@@ -55,24 +55,49 @@ fn main() {
     } else {
         std::path::PathBuf::from("roms")
     };
-    println!(">>> Using ROMs directory: {:?}", roms_dir);
+    println!(">>> ROMs directory resolved to: {:?}", std::fs::canonicalize(&roms_dir).unwrap_or(roms_dir.clone()));
 
-    // The downloaded ROM is ~20KB. Typical layout for these dumps:
-    // Load the correct Apple II+ ROM set (341-0011 through 341-0020)
-    // Downloaded from mirrors.apple2.org.za, merged into a single 12KB file
-    let mut char_rom = [0x55u8; 2048]; // Checkerboard fallback
+    // Load Main ROM
     let main_rom_path = roms_dir.join("APPLE2PLUS.ROM");
-    if let Ok(rom_file) = std::fs::read(&main_rom_path) {
-        println!("Loaded Apple II+ ROM: {} bytes", rom_file.len());
-        if rom_file.len() >= 12288 {
-            let start = rom_file.len() - 12288;
-            machine.load_rom(&rom_file[start..]);
+    match std::fs::read(&main_rom_path) {
+        Ok(rom_file) => {
+            println!("Loaded Apple II+ ROM: {} bytes", rom_file.len());
+            if rom_file.len() >= 12288 {
+                let start = rom_file.len() - 12288;
+                machine.load_rom(&rom_file[start..]);
+            }
         }
-    } else {
-        println!("Warning: Could not open {}. Using empty memory.", main_rom_path.display());
+        Err(e) => println!("ERROR: Could not open {}: {}", main_rom_path.display(), e),
     }
     
-    // Apple II+ Character ROM (341-0036 Rev. 7)
+    // Load Disk II Boot ROM
+    let disk_rom_path = roms_dir.join("DISK2.ROM");
+    match std::fs::read(&disk_rom_path) {
+        Ok(disk_rom) => {
+            if disk_rom.len() == 256 {
+                machine.mem.disk2.load_boot_rom(&disk_rom);
+                println!("Loaded Disk II Boot ROM (Slot 6): 256 bytes");
+            }
+        }
+        Err(e) => println!("ERROR: Could not open {}: {}", disk_rom_path.display(), e),
+    }
+
+    // Load Disk Image
+    let dsk_path = roms_dir.join("MASTER.DSK");
+    match std::fs::read(&dsk_path) {
+        Ok(disk_image) => {
+            if disk_image.len() == 143360 {
+                machine.mem.disk2.load_disk(&disk_image);
+                println!("Loaded MASTER.DSK floppy image: 140KB");
+            } else {
+                println!("WARNING: MASTER.DSK size mismatch: {}", disk_image.len());
+            }
+        }
+        Err(e) => println!("ERROR: Could not open {}: {}", dsk_path.display(), e),
+    }
+
+    // Load Character ROM
+    let mut char_rom = [0x55u8; 2048]; // Checkerboard fallback
     let char_rom_path = roms_dir.join("Apple II plus Video ROM - 341-0036 - Rev. 7.bin");
     let fallback_char_path = roms_dir.join("extracted_2048_152.bin");
     if let Ok(char_file) = std::fs::read(&char_rom_path) {
@@ -85,30 +110,6 @@ fn main() {
             char_rom.copy_from_slice(&char_file);
             println!("Loaded Character ROM (fallback): 2048 bytes");
         }
-    }
-    
-    // Load Disk II Boot ROM (P5A / 341-0027) into Slot 6
-    let disk_rom_path = roms_dir.join("DISK2.ROM");
-    if let Ok(disk_rom) = std::fs::read(&disk_rom_path) {
-        if disk_rom.len() == 256 {
-            machine.mem.disk2.load_boot_rom(&disk_rom);
-            println!("Loaded Disk II Boot ROM (Slot 6): 256 bytes");
-        }
-    } else {
-        println!("Warning: Could not open Disk II Boot ROM at {}", disk_rom_path.display());
-    }
-
-    // Load DOS 3.3 MASTER.DSK (place in roms/ folder - see SETUP.md)
-    let dsk_path = roms_dir.join("MASTER.DSK");
-    if let Ok(disk_image) = std::fs::read(&dsk_path) {
-        if disk_image.len() == 143360 {
-            machine.mem.disk2.load_disk(&disk_image);
-            println!("Loaded MASTER.DSK floppy image: 140KB");
-        } else {
-            println!("Warning: MASTER.DSK size mismatch: {}", disk_image.len());
-        }
-    } else {
-        println!("Warning: Could not open MASTER.DSK at {}", dsk_path.display());
     }
 
     // Initialize Memory mapped states and then Reset CPU
