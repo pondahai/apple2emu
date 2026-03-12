@@ -46,12 +46,12 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
                 track_offset + logical_sector * 256 + 256
             ];
 
-            // ── Address Field ───────────────────────────────────────────
+            // Address Field
             track_out.push(0xD5); track_out.push(0xAA); track_out.push(0x96);
 
             let vol: u8 = 254;
             let trk: u8 = track_num as u8;
-            let sec: u8 = logical_sector as u8;  // logical sector number
+            let sec: u8 = logical_sector as u8;
             let chk: u8 = vol ^ trk ^ sec;
 
             let encode4x4 = |val: u8| -> (u8, u8) { ((val >> 1) | 0xAA, val | 0xAA) };
@@ -65,36 +65,39 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
             // Inter-field gap: 6 self-sync bytes
             for _ in 0..6 { track_out.push(0xFF); }
 
-            // ── Data Field ──────────────────────────────────────────────
+            // Data Field
             track_out.push(0xD5); track_out.push(0xAA); track_out.push(0xAD);
 
             // 6-and-2 encoding per "Beneath Apple DOS" Chapter 3
             //
+            // The RWTS decode loop does a bit-swap (bit0<->bit1) on each 2-bit secondary
+            // value when reconstructing the original bytes.  Therefore the encode side
+            // must pre-apply the same swap so the round-trip is correct.
+            //
             // Build secondary nibble buffer (snib, 86 bytes):
-            //   256 source bytes are split into 3 groups:
-            //     group 0: bytes [  0.. 85] -> contribute bits[1:0] at snib[i%86] shift 0
-            //     group 1: bytes [ 86..171] -> contribute bits[1:0] at snib[i%86] shift 2
-            //     group 2: bytes [172..255] -> contribute bits[1:0] at snib[i%86] shift 4
-            //   No bit-reversal. snib[idx] is output in REVERSE order (snib[85]..snib[0]).
+            //   group 0: bytes [  0.. 85] -> bit-swapped bits[1:0] at snib[i%86] shift 0
+            //   group 1: bytes [ 86..171] -> bit-swapped bits[1:0] at snib[i%86] shift 2
+            //   group 2: bytes [172..255] -> bit-swapped bits[1:0] at snib[i%86] shift 4
+            //   snib is output in REVERSE order (snib[85]..snib[0]).
             let mut snib = [0u8; 86];
             for i in 0..256 {
                 let bits2 = sector_data[i] & 0x03;
+                // bit-swap: bit0<->bit1 to match RWTS decode expectation
+                let bits2_swapped = ((bits2 & 0x01) << 1) | ((bits2 & 0x02) >> 1);
                 let idx   = i % 86;
                 let shift = (i / 86) * 2;  // 0, 2, or 4
-                snib[idx] |= bits2 << shift;
+                snib[idx] |= bits2_swapped << shift;
             }
 
-            // XOR-encode and emit: snib in reverse, then primary in order
+            // XOR-encode and emit: snib reversed, then primary in order
             let mut last_val: u8 = 0;
 
-            // snib reversed: snib[85], snib[84], ..., snib[0]
             for i in 0..86 {
                 let val6 = snib[85 - i] & 0x3F;
                 track_out.push(NIBBLE_WRITE_TABLE[(val6 ^ last_val) as usize]);
                 last_val = val6;
             }
 
-            // primary: upper 6 bits of sector_data[0..255]
             for i in 0..256 {
                 let val6 = sector_data[i] >> 2;
                 track_out.push(NIBBLE_WRITE_TABLE[(val6 ^ last_val) as usize]);
