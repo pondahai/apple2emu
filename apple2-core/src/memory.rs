@@ -32,6 +32,13 @@ pub struct Apple2Memory {
 
     // Speaker State
     pub speaker: bool,
+
+    // Language Card (16K RAM at $D000-$FFFF)
+    pub lc_ram: [u8; 16384],
+    pub lc_read_enable: bool,
+    pub lc_write_enable: bool,
+    pub lc_bank2: bool,
+    pub lc_pre_write_switch: u16,
 }
 
 impl Apple2Memory {
@@ -46,6 +53,11 @@ impl Apple2Memory {
             keyboard_latch: 0,
             disk2: alloc::boxed::Box::new(Disk2::new()),
             speaker: false,
+            lc_ram: [0; 16384],
+            lc_read_enable: false,
+            lc_write_enable: false,
+            lc_bank2: true,
+            lc_pre_write_switch: 0,
         }
     }
 
@@ -64,6 +76,11 @@ impl Apple2Memory {
         self.speaker = false;
         self.disk2.reset();
         
+        self.lc_read_enable = false;
+        self.lc_write_enable = false;
+        self.lc_bank2 = true;
+        self.lc_pre_write_switch = 0;
+
         // Ensure Apple II ROM performs a cold boot by clearing the signature
         self.ram[0x03F4] = 0;
     }
@@ -72,7 +89,8 @@ impl Apple2Memory {
 // Memory map implementation specific for Apple II
 impl Memory for Apple2Memory {
     fn read(&mut self, addr: u16) -> u8 {
-        match addr {
+        let mut clear_pre_write = true;
+        let val = match addr {
             // Main RAM (48K)
             0x0000..=0xBFFF => self.ram[addr as usize],
 
@@ -88,6 +106,27 @@ impl Memory for Apple2Memory {
                         let val = self.keyboard_latch;
                         self.keyboard_latch &= 0x7F; // Clear highest bit
                         val // Return the value BEFORE clearing (some routines check it)
+                    }
+                    // Language Card Soft Switches
+                    0xC080..=0xC08F => {
+                        let bank2 = (addr & 0x08) == 0;
+                        let read_ram = (addr & 0x03) == 0x00 || (addr & 0x03) == 0x03;
+                        let is_write_en_switch = (addr & 0x01) != 0;
+
+                        self.lc_bank2 = bank2;
+                        self.lc_read_enable = read_ram;
+
+                        if is_write_en_switch {
+                            if self.lc_pre_write_switch == addr {
+                                self.lc_write_enable = true;
+                            }
+                            self.lc_pre_write_switch = addr;
+                            clear_pre_write = false;
+                        } else {
+                            self.lc_write_enable = false;
+                        }
+                        
+                        0 // Normally this floats, return 0
                     }
                     // Disk II Controller (Slot 6)
                     0xC0E0..=0xC0EF => {
@@ -113,18 +152,48 @@ impl Memory for Apple2Memory {
                     0xC600..=0xC6FF => {
                         self.disk2.rom[(addr - 0xC600) as usize]
                     }
+                    
+                    // Pushbuttons / Joystick / Paddles
+                    // $C061 (Pushbutton 0), $C062 (Pushbutton 1) -> 0x00 (Not pressed)
+                    // $C064-$C067 (Analog Paddles) -> For simplicity, return 0x00 (Timeout immediately)
+                    // Wait, returning 0x00 immediately for paddles might crash calibration loops.
+                    // Let's return 0x00 for now, but if it crashes we might need a proper timer.
+                    0xC061..=0xC067 => 0x00,
+
                     // For now, other I/O returns 0 (Video switches, Disk II, etc.)
                     _ => 0,
                 }
             }
 
-            // Standard System ROM (12K)
-            0xD000..=0xFFFF => self.rom[(addr - 0xD000) as usize],
+            // Standard System ROM or Language Card RAM (12K / 16K)
+            0xD000..=0xFFFF => {
+                if self.lc_read_enable {
+                    if addr < 0xE000 {
+                        if self.lc_bank2 {
+                            self.lc_ram[(addr - 0xD000 + 0x1000) as usize]
+                        } else {
+                            self.lc_ram[(addr - 0xD000) as usize]
+                        }
+                    } else {
+                        self.lc_ram[(addr - 0xE000 + 0x2000) as usize]
+                    }
+                } else {
+                    self.rom[(addr - 0xD000) as usize]
+                }
+            }
+        };
+
+        if clear_pre_write {
+            self.lc_pre_write_switch = 0;
         }
+
+        val
     }
 
     fn write(&mut self, addr: u16, data: u8) {
-         match addr {
+        self.lc_pre_write_switch = 0;
+        
+        match addr {
             // Main RAM (48K)
             0x0000..=0xBFFF => {
                 self.ram[addr as usize] = data;
@@ -136,6 +205,15 @@ impl Memory for Apple2Memory {
                     // Keyboard Clear Strobe (also on read, but write triggers too)
                     0xC010 => {
                         self.keyboard_latch &= 0x7F; // Clear highest bit
+                    }
+                    // Language Card Soft Switches
+                    0xC080..=0xC08F => {
+                        let bank2 = (addr & 0x08) == 0;
+                        let read_ram = (addr & 0x03) == 0x00 || (addr & 0x03) == 0x03;
+
+                        self.lc_bank2 = bank2;
+                        self.lc_read_enable = read_ram;
+                        self.lc_write_enable = false; // Writes to LC switches always write-protect
                     }
                     // Disk II Controller (Slot 6)
                     0xC0E0..=0xC0EF => {
@@ -160,11 +238,20 @@ impl Memory for Apple2Memory {
                 }
             }
 
-            // Try to write to ROM -> Ignore
+            // Language Card RAM (12K / 16K)
             0xD000..=0xFFFF => {
-                // ROM is Read-Only
+                if self.lc_write_enable {
+                    if addr < 0xE000 {
+                        if self.lc_bank2 {
+                            self.lc_ram[(addr - 0xD000 + 0x1000) as usize] = data;
+                        } else {
+                            self.lc_ram[(addr - 0xD000) as usize] = data;
+                        }
+                    } else {
+                        self.lc_ram[(addr - 0xE000 + 0x2000) as usize] = data;
+                    }
+                }
             }
         }
     }
 }
-

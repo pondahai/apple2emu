@@ -299,19 +299,41 @@ fn main() {
 
         // Emulate CPU execution for one Frame
         let mut frame_cycles = 0;
-        let mut audio_samples: Vec<f32> = Vec::with_capacity(750);
-        let sample_rate = 22050.0;
+        let mut audio_samples: Vec<f32> = Vec::with_capacity(1500);
+        let sample_rate = 44100.0;
         let cycles_per_sample = 1_023_000.0 / sample_rate;
         let turbo_mode = speed_multiplier > 1;
         let target_cycles = BASE_FRAME_CYCLES * speed_multiplier;
 
+        let mut audio_high_cycles = 0.0;
+        let mut audio_total_cycles = 0.0;
+
         while frame_cycles < target_cycles {
             let cycles = machine.step();
             frame_cycles += cycles;
+            
+            let c = cycles as f32;
+            audio_total_cycles += c;
+            if machine.mem.speaker {
+                audio_high_cycles += c;
+            }
 
-            unprocessed_cycles += cycles as f32;
+            unprocessed_cycles += c;
             while unprocessed_cycles >= cycles_per_sample {
-                let raw_sample_val = if machine.mem.speaker { 0.1 } else { -0.1 };
+                // Calculate the ratio of time the speaker was ON during this sample window
+                let ratio = if audio_total_cycles > 0.0 {
+                    audio_high_cycles / audio_total_cycles
+                } else {
+                    if machine.mem.speaker { 1.0 } else { 0.0 }
+                };
+                
+                // Map [0.0, 1.0] to [-0.15, 0.15] amplitude
+                let raw_sample_val = (ratio * 0.3) - 0.15;
+                
+                // Reset accumulators for the next sample
+                audio_high_cycles = 0.0;
+                audio_total_cycles = 0.0;
+
                 let filtered_val = raw_sample_val - dc_filter_x1 + 0.995 * dc_filter_y1;
                 dc_filter_x1 = raw_sample_val;
                 dc_filter_y1 = filtered_val;

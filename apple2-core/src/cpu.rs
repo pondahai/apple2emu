@@ -425,6 +425,42 @@ impl CPU {
             0xE3 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectX); self.isc_with_addr(mem, addr); 8 }
             0xF3 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectY); self.isc_with_addr(mem, addr); 8 }
 
+            // SLO (Illegal: ASL then ORA)
+            0x0F => { let (addr, _) = self.get_operand_address(mem, AddressingMode::Absolute); self.slo_with_addr(mem, addr); 6 }
+            0x07 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPage); self.slo_with_addr(mem, addr); 5 }
+            0x17 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPageX); self.slo_with_addr(mem, addr); 6 }
+            0x1F => { let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteX); self.slo_with_addr(mem, addr); 7 }
+            0x1B => { let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteY); self.slo_with_addr(mem, addr); 7 }
+            0x03 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectX); self.slo_with_addr(mem, addr); 8 }
+            0x13 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectY); self.slo_with_addr(mem, addr); 8 }
+
+            // RLA (Illegal: ROL then AND)
+            0x2F => { let (addr, _) = self.get_operand_address(mem, AddressingMode::Absolute); self.rla_with_addr(mem, addr); 6 }
+            0x27 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPage); self.rla_with_addr(mem, addr); 5 }
+            0x37 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPageX); self.rla_with_addr(mem, addr); 6 }
+            0x3F => { let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteX); self.rla_with_addr(mem, addr); 7 }
+            0x3B => { let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteY); self.rla_with_addr(mem, addr); 7 }
+            0x23 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectX); self.rla_with_addr(mem, addr); 8 }
+            0x33 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectY); self.rla_with_addr(mem, addr); 8 }
+
+            // SRE (Illegal: LSR then EOR)
+            0x4F => { let (addr, _) = self.get_operand_address(mem, AddressingMode::Absolute); self.sre_with_addr(mem, addr); 6 }
+            0x47 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPage); self.sre_with_addr(mem, addr); 5 }
+            0x57 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPageX); self.sre_with_addr(mem, addr); 6 }
+            0x5F => { let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteX); self.sre_with_addr(mem, addr); 7 }
+            0x5B => { let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteY); self.sre_with_addr(mem, addr); 7 }
+            0x43 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectX); self.sre_with_addr(mem, addr); 8 }
+            0x53 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectY); self.sre_with_addr(mem, addr); 8 }
+
+            // RRA (Illegal: ROR then ADC)
+            0x6F => { let (addr, _) = self.get_operand_address(mem, AddressingMode::Absolute); self.rra_with_addr(mem, addr); 6 }
+            0x67 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPage); self.rra_with_addr(mem, addr); 5 }
+            0x77 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::ZeroPageX); self.rra_with_addr(mem, addr); 6 }
+            0x7F => { let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteX); self.rra_with_addr(mem, addr); 7 }
+            0x7B => { let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteY); self.rra_with_addr(mem, addr); 7 }
+            0x63 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectX); self.rra_with_addr(mem, addr); 8 }
+            0x73 => { let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectY); self.rra_with_addr(mem, addr); 8 }
+
             _ => 2
         };
         cycles + extra_cycles
@@ -440,6 +476,43 @@ impl CPU {
         let val = mem.read(addr).wrapping_add(1);
         mem.write(addr, val);
         self.adc_with_val(!val);
+    }
+
+    fn slo_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
+        let mut data = mem.read(addr);
+        self.status.c = (data >> 7) == 1;
+        data <<= 1;
+        mem.write(addr, data);
+        self.a |= data;
+        self.update_zero_and_negative_flags(self.a);
+    }
+
+    fn rla_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
+        let mut data = mem.read(addr);
+        let old_c = self.status.c;
+        self.status.c = (data >> 7) == 1;
+        data = (data << 1) | (if old_c { 1 } else { 0 });
+        mem.write(addr, data);
+        self.a &= data;
+        self.update_zero_and_negative_flags(self.a);
+    }
+
+    fn sre_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
+        let mut data = mem.read(addr);
+        self.status.c = (data & 1) == 1;
+        data >>= 1;
+        mem.write(addr, data);
+        self.a ^= data;
+        self.update_zero_and_negative_flags(self.a);
+    }
+
+    fn rra_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
+        let mut data = mem.read(addr);
+        let old_c = self.status.c;
+        self.status.c = (data & 1) == 1;
+        data = (data >> 1) | (if old_c { 0x80 } else { 0 });
+        mem.write(addr, data);
+        self.adc_with_val(data);
     }
 }
 
