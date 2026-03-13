@@ -259,6 +259,27 @@ fn main() {
         // Audio Frame append
         if let Some(s) = &sink {
             if !audio_samples.is_empty() {
+                // To prevent chopped audio, we want to maintain a healthy backlog ahead of the soundcard.
+                let buf_len = s.len();
+
+                // If queue is absurdly long (emulator dragging/paused), clear and resync
+                if buf_len > 15 {
+                    s.clear();
+                }
+
+                // If the queue is running dry (under 2 frames), we inject a tiny bit of silence
+                // to give the emulator a moment to catch up, preventing hard clipping.
+                if buf_len == 0 {
+                    let mut padding = vec![0.0; (sample_rate / 60.0) as usize];
+                    // smoothly transition the padding into silence
+                    for x in padding.iter_mut() {
+                        *x = dc_filter_y1;
+                        dc_filter_y1 *= 0.995;
+                    }
+                    let pad_source = rodio::buffer::SamplesBuffer::new(1, sample_rate as u32, padding);
+                    s.append(pad_source);
+                }
+
                 let source = rodio::buffer::SamplesBuffer::new(1, sample_rate as u32, audio_samples);
                 s.append(source);
             }
