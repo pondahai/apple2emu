@@ -71,16 +71,12 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
 
             // 6-and-2 encoding per "Beneath Apple DOS" Chapter 3
             //
-            // RWTS decode reconstructs bytes as:
-            //   data[k]      |= bit-swap( (snib[k] >> 4) & 0x03 )
-            //   data[k+86]   |= bit-swap( (snib[k] >> 2) & 0x03 )
-            //   data[k+172]  |= bit-swap( (snib[k] >> 0) & 0x03 )
+            // For each index k in 0..86, the secondary nibble snib[k] is:
+            //   bits [1:0] = sector_data[k]       & 0x03  (group 0, offset 0)
+            //   bits [3:2] = sector_data[k + 86]  & 0x03  (group 1, offset 86)
+            //   bits [5:4] = sector_data[k + 172] & 0x03  (group 2, offset 172, k<84 only)
             //
-            // Therefore encode must: snib[k] bits[5:4] = swap2(data[k] & 0x03)
-            //                        snib[k] bits[3:2] = swap2(data[k+86] & 0x03)
-            //                        snib[k] bits[1:0] = swap2(data[k+172] & 0x03)
-            //
-            // snib is emitted in REVERSE order: snib[85]..snib[0]
+            // No bit-swap. The secondary buffer is emitted REVERSED (snib[85]..snib[0]).
             let swap2 = |b: u8| -> u8 { ((b & 0x01) << 1) | ((b & 0x02) >> 1) };
 
             let mut snib = [0u8; 86];
@@ -90,14 +86,13 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
                 let b2 = if k + 172 < 256 {
                     swap2(sector_data[k + 172] & 0x03)
                 } else { 0 };
-                snib[k] = (b0 << 4) | (b1 << 2) | b2;
+                snib[k] = (b2 << 4) | (b1 << 2) | b0;
             }
 
-            // XOR-encode and emit: snib reversed, then primary
             let mut last_val: u8 = 0;
 
             for i in 0..86 {
-                let val6 = snib[85 - i] & 0x3F;
+                let val6 = snib[i] & 0x3F;
                 track_out.push(NIBBLE_WRITE_TABLE[(val6 ^ last_val) as usize]);
                 last_val = val6;
             }
@@ -113,9 +108,8 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
 
             track_out.push(0xDE); track_out.push(0xAA); track_out.push(0xEB);
 
-            // Inter-sector gap: enlarged to 128 self-sync bytes to compensate
-            // for emulator timing jitter (debug prints, etc.)
-            for _ in 0..128 { track_out.push(0xFF); }
+            // Inter-sector gap: 27 self-sync bytes
+            for _ in 0..27 { track_out.push(0xFF); }
         }
         tracks.push(track_out);
     }

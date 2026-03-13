@@ -374,8 +374,10 @@ impl CPU {
 
             // NOP
             0xEA => { self.nop(); 2 }
-            // 2-byte NOPs (SKB: Skip Byte)
-            0x04 | 0x44 | 0x64 | 0x80 | 0x82 | 0x89 | 0xC2 | 0xE2 => { self.fetch_byte(mem); 3 } 
+            // SKB (Zero Page)
+            0x04 | 0x44 | 0x64 => { let addr = self.fetch_byte(mem); mem.read(addr as u16); 3 }
+            // SKB (Immediate)
+            0x80 | 0x82 | 0x89 | 0xC2 | 0xE2 => { self.fetch_byte(mem); 2 }
             // 3-byte NOPs (SKW: Skip Word)
             0x0C => { let addr = self.fetch_word(mem); mem.read(addr); 4 }
             // Indexed 2-byte NOPs (Zero Page,X)
