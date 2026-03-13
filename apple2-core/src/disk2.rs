@@ -142,13 +142,14 @@ impl Disk2 {
                 self.cycles_accumulator -= 32;
                 let track = &mut self.tracks[self.current_track];
                 if track.length > 0 {
-                    if self.load_mode {
-                        // Write mode: write latch to disk surface
+                    if self.write_mode && self.load_mode {
+                        // Q6=1, Q7=1: Write Data to disk surface
                         track.raw_bytes[self.byte_index] = self.data_latch;
-                    } else {
-                        // Read mode
+                    } else if !self.write_mode {
+                        // Q6=0: Read mode
                         self.data_latch = track.raw_bytes[self.byte_index];
                     }
+                    // Note: If Q6=1 and Q7=0 (Sense WP), do neither read nor write to surface.
                     self.byte_index = (self.byte_index + 1) % track.length;
                 }
             }
