@@ -109,6 +109,7 @@ fn main() {
     let mut last_keys: Vec<Key> = Vec::new();
     
     let mut last_f2_down = false;
+    let mut last_f3_down = false;
     let mut unprocessed_cycles: f32 = 0.0;
     let mut dc_filter_x1: f32 = 0.0;
     let mut dc_filter_y1: f32 = 0.0;
@@ -161,6 +162,20 @@ fn main() {
             machine.power_on();
         }
         last_f2_down = window.is_key_down(Key::F2);
+
+        let f3_down = window.is_key_down(Key::F3);
+        if f3_down && !last_f3_down {
+            let file = rfd::FileDialog::new()
+                .add_filter("Apple II Disk Image", &["dsk", "do", "po", "gz"])
+                .pick_file();
+            if let Some(path) = file {
+                if let Ok(raw_data) = std::fs::read(&path) {
+                    machine.mem.disk2.load_disk(&raw_data);
+                    println!("Successfully loaded disk: {:?}", path.file_name().unwrap_or_default());
+                }
+            }
+        }
+        last_f3_down = f3_down;
 
         if (machine.mem.keyboard_latch & 0x80) == 0 {
             if let Some(ascii) = key_queue.pop_front() {
