@@ -46,11 +46,7 @@ impl Disk2 {
     }
 
     pub fn read_io(&mut self, addr: u16) -> u8 {
-        if addr != 0xC0EC {
-            self.handle_io(addr);
-        } else {
-            self.write_mode = false;
-        }
+        self.handle_io(addr);
 
         let switch = addr & 0x0F;
 
@@ -59,7 +55,7 @@ impl Disk2 {
                 // $C0EC (Q6_OFF): Read Data
                 if !self.is_disk_loaded { return 0x00; }
                 if self.load_mode {
-                    // Shifting data out in write mode; reading shouldn't destroy latch
+                    // Shifting data out in write mode; reading shouldnt destroy latch
                     return 0x00;
                 }
                 let val = self.data_latch;
@@ -68,7 +64,7 @@ impl Disk2 {
             } else if switch == 0x0E {
                 // $C0EE (Q7_OFF): Sense WP
                 // Return 0x00 if not write-protected, 0x80 if protected.
-                // It's typically polled after $C08D (Q6_ON).
+                // Its typically polled after $C08D (Q6_ON).
                 if self.write_mode {
                     return 0x00; // Not write-protected
                 }
@@ -82,7 +78,8 @@ impl Disk2 {
         self.handle_io(addr); 
         
         // When Q7=1 (load_mode) and Q6=1 (write_mode), we are in Write Load state.
-        // The data bus is loaded into the controller's data register.
+        // The data bus is loaded into the controllers data register.
+        // This is typically triggered by a write to $C0EF (or any $C0EX where Q6/Q7=1)
         if self.load_mode && self.write_mode {
             self.data_latch = data;
         }
