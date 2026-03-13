@@ -57,6 +57,10 @@ fn main() {
     };
     println!(">>> ROMs directory resolved to: {:?}", std::fs::canonicalize(&roms_dir).unwrap_or(roms_dir.clone()));
 
+    let mut cached_main_rom = Vec::new();
+    let mut cached_disk_rom = Vec::new();
+    let mut cached_disk_image: Option<Vec<u8>> = None;
+
     // Load Main ROM
     let main_rom_path = roms_dir.join("APPLE2PLUS.ROM");
     match std::fs::read(&main_rom_path) {
@@ -64,7 +68,8 @@ fn main() {
             println!("Loaded Apple II+ ROM: {} bytes", rom_file.len());
             if rom_file.len() >= 12288 {
                 let start = rom_file.len() - 12288;
-                machine.load_rom(&rom_file[start..]);
+                cached_main_rom = rom_file[start..].to_vec();
+                machine.load_rom(&cached_main_rom);
             }
         }
         Err(e) => println!("ERROR: Could not open {}: {}", main_rom_path.display(), e),
@@ -75,7 +80,8 @@ fn main() {
     match std::fs::read(&disk_rom_path) {
         Ok(disk_rom) => {
             if disk_rom.len() == 256 {
-                machine.mem.disk2.load_boot_rom(&disk_rom);
+                cached_disk_rom = disk_rom.clone();
+                machine.mem.disk2.load_boot_rom(&cached_disk_rom);
                 println!("Loaded Disk II Boot ROM (Slot 6): 256 bytes");
             }
         }
@@ -93,6 +99,7 @@ fn main() {
     match std::fs::read(&dsk_path) {
         Ok(disk_image) => {
             if disk_image.len() == 143360 {
+                cached_disk_image = Some(disk_image.clone());
                 machine.mem.disk2.load_disk(&disk_image);
                 println!("Loaded floppy image from {}: 140KB", dsk_path.display());
             } else {
@@ -200,7 +207,17 @@ fn main() {
                 machine.reset();
             } else {
                 println!(">>> REBOOT (Cold Boot)");
-                machine.power_on();
+                machine = Apple2Machine::new();
+                if !cached_main_rom.is_empty() {
+                    machine.load_rom(&cached_main_rom);
+                }
+                if !cached_disk_rom.is_empty() {
+                    machine.mem.disk2.load_boot_rom(&cached_disk_rom);
+                }
+                if let Some(ref disk) = cached_disk_image {
+                    machine.mem.disk2.load_disk(disk);
+                }
+                machine.reset();
             }
         }
         last_f2_down = window.is_key_down(Key::F2);
@@ -212,6 +229,7 @@ fn main() {
                 .pick_file();
             if let Some(path) = file {
                 if let Ok(raw_data) = std::fs::read(&path) {
+                    cached_disk_image = Some(raw_data.clone());
                     machine.mem.disk2.load_disk(&raw_data);
                     println!("Successfully loaded disk: {:?}", path.file_name().unwrap_or_default());
                     config.last_disk_path = Some(path);
