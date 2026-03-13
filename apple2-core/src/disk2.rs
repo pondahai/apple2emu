@@ -52,17 +52,41 @@ impl Disk2 {
             self.write_mode = false;
         }
 
-        if self.motor_on && (addr & 0x01 == 0) {
-            if !self.is_disk_loaded { return 0x00; }
-            let val = self.data_latch;
-            // Destructive Read: Required for stable RWTS polling in emulator
-            self.data_latch &= 0x7F; 
-            return val;
+        let switch = addr & 0x0F;
+
+        if self.motor_on {
+            if switch == 0x0C {
+                // $C0EC (Q6_OFF): Read Data
+                if !self.is_disk_loaded { return 0x00; }
+                if self.load_mode {
+                    // Shifting data out in write mode; reading shouldn't destroy latch
+                    return 0x00;
+                }
+                let val = self.data_latch;
+                self.data_latch &= 0x7F; // Destructive read
+                return val;
+            } else if switch == 0x0E {
+                // $C0EE (Q7_OFF): Sense WP
+                // Return 0x00 if not write-protected, 0x80 if protected.
+                // It's typically polled after $C08D (Q6_ON).
+                if self.write_mode {
+                    return 0x00; // Not write-protected
+                }
+                return 0x00;
+            }
         }
         0x00
     }
 
-    pub fn write_io(&mut self, addr: u16, _data: u8) { self.handle_io(addr); }
+    pub fn write_io(&mut self, addr: u16, data: u8) { 
+        self.handle_io(addr); 
+        
+        // When Q7=1 (load_mode) and Q6=1 (write_mode), we are in Write Load state.
+        // The data bus is loaded into the controller's data register.
+        if self.load_mode && self.write_mode {
+            self.data_latch = data;
+        }
+    }
 
     fn handle_io(&mut self, addr: u16) {
         let switch = (addr & 0x0F) as usize;
@@ -116,9 +140,15 @@ impl Disk2 {
             self.cycles_accumulator += cycles;
             while self.cycles_accumulator >= 32 {
                 self.cycles_accumulator -= 32;
-                let track = &self.tracks[self.current_track];
+                let track = &mut self.tracks[self.current_track];
                 if track.length > 0 {
-                    self.data_latch = track.raw_bytes[self.byte_index];
+                    if self.load_mode {
+                        // Write mode: write latch to disk surface
+                        track.raw_bytes[self.byte_index] = self.data_latch;
+                    } else {
+                        // Read mode
+                        self.data_latch = track.raw_bytes[self.byte_index];
+                    }
                     self.byte_index = (self.byte_index + 1) % track.length;
                 }
             }

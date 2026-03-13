@@ -10,6 +10,11 @@
     * 已實作 Page Cross Penalty 與非法 NOP 週期補全。
 
 ## 第二階段：功能補強 (進行中)
+* [x] **磁碟寫入支援 (Write Mode & State Sequencer)**
+    * 實作 Q6/Q7 寫入狀態機與 32-cycle 寫入迴圈時序同步。
+    * 修復 Error #4 (Write Protect) 與 Error #8 (I/O Error) 寫入時序問題。
+* [ ] **Denibblize 回寫機制**
+    * 將記憶體中的磁軌資料 (Nibble) 反解碼回 `.dsk` 格式並存檔。
 * [ ] **非法指令深度補全**
     * 解決 DOS 核心跳轉至 $B002 後的崩潰問題。
 
