@@ -46,11 +46,8 @@ impl Disk2 {
     }
 
     pub fn read_io(&mut self, addr: u16) -> u8 {
-        if addr != 0xC0EC {
-            self.handle_io(addr);
-        } else {
-            self.write_mode = false;
-        }
+        // Soft switches update state on both read and write
+        self.handle_io(addr);
 
         let switch = addr & 0x0F;
 
@@ -58,23 +55,28 @@ impl Disk2 {
             if switch == 0x0C {
                 // $C0EC (Q6_OFF): Read Data
                 if !self.is_disk_loaded { return 0x00; }
+                
+                // If Q7 is ON (load_mode), we are shifting data out,
+                // do NOT destructively read the latch.
                 if self.load_mode {
-                    // Shifting data out in write mode; reading shouldn't destroy latch
-                    return 0x00;
+                    return self.data_latch; // Return current latch without destroying
                 }
+                
                 let val = self.data_latch;
-                self.data_latch &= 0x7F; // Destructive read
+                // Reading data when Q6=0 and Q7=0 clears the MSB (destructive read)
+                self.data_latch &= 0x7F;
                 return val;
+
             } else if switch == 0x0E {
                 // $C0EE (Q7_OFF): Sense WP
-                // Return 0x00 if not write-protected, 0x80 if protected.
-                // It's typically polled after $C08D (Q6_ON).
-                if self.write_mode {
-                    return 0x00; // Not write-protected
-                }
-                return 0x00;
+                // Bit 7 is high if write protected. 
+                // We return 0x00 meaning "Not Write Protected" so SAVE can succeed.
+                return 0x00; 
             }
         }
+        
+        // Default return for other switches / motor off
+        // Usually returning random bus noise, but 0x00 is safe.
         0x00
     }
 
@@ -83,6 +85,7 @@ impl Disk2 {
         
         // When Q7=1 (load_mode) and Q6=1 (write_mode), we are in Write Load state.
         // The data bus is loaded into the controller's data register.
+        // This is typically triggered by a write to $C0EF (or any $C0EX where Q6/Q7=1)
         if self.load_mode && self.write_mode {
             self.data_latch = data;
         }
