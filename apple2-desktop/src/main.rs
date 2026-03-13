@@ -136,7 +136,8 @@ fn main() {
         }
         last_keys = current_keys;
         let ctrl_down = window.is_key_down(Key::LeftCtrl) || window.is_key_down(Key::RightCtrl);
-        
+        let shift_down = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
+
         for &key in keys.iter() {
             let ascii = match key {
                 Key::A => if ctrl_down { 0x01 } else { b'A' },
@@ -165,6 +166,28 @@ fn main() {
                 Key::X => if ctrl_down { 0x18 } else { b'X' },
                 Key::Y => if ctrl_down { 0x19 } else { b'Y' },
                 Key::Z => if ctrl_down { 0x1A } else { b'Z' },
+
+                // Numbers and Symbols
+                Key::Key0 => if shift_down { b')' } else { b'0' },
+                Key::Key1 => if shift_down { b'!' } else { b'1' },
+                Key::Key2 => if shift_down { b'@' } else { b'2' },
+                Key::Key3 => if shift_down { b'#' } else { b'3' },
+                Key::Key4 => if shift_down { b'$' } else { b'4' },
+                Key::Key5 => if shift_down { b'%' } else { b'5' },
+                Key::Key6 => if shift_down { b'^' } else { b'6' },
+                Key::Key7 => if shift_down { b'&' } else { b'7' },
+                Key::Key8 => if shift_down { b'*' } else { b'8' },
+                Key::Key9 => if shift_down { b'(' } else { b'9' },
+
+                Key::Minus => if shift_down { b'_' } else { b'-' },
+                Key::Equal => if shift_down { b'+' } else { b'=' },
+                Key::Comma => if shift_down { b'<' } else { b',' },
+                Key::Period => if shift_down { b'>' } else { b'.' },
+                Key::Slash => if shift_down { b'?' } else { b'/' },
+                Key::Semicolon => if shift_down { b':' } else { b';' },
+                Key::Apostrophe => if shift_down { b'"' } else { b'\'' },
+
+                // Control Keys
                 Key::Space => b' ', Key::Enter => 0x0D, Key::Backspace => 0x08,
                 _ => 0,
             };
