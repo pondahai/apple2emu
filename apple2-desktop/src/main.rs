@@ -110,6 +110,8 @@ fn main() {
     
     let mut last_f2_down = false;
     let mut last_f3_down = false;
+    let mut last_f4_down = false;
+    let mut turbo_mode = false;
     let mut unprocessed_cycles: f32 = 0.0;
     let mut dc_filter_x1: f32 = 0.0;
     let mut dc_filter_y1: f32 = 0.0;
@@ -177,6 +179,13 @@ fn main() {
         }
         last_f3_down = f3_down;
 
+        let f4_down = window.is_key_down(Key::F4);
+        if f4_down && !last_f4_down {
+            turbo_mode = !turbo_mode;
+            println!(">>> Turbo Mode: {}", if turbo_mode { "ON" } else { "OFF" });
+        }
+        last_f4_down = f4_down;
+
         if (machine.mem.keyboard_latch & 0x80) == 0 {
             if let Some(ascii) = key_queue.pop_front() {
                 machine.mem.keyboard_latch = 0x80 | ascii;
@@ -188,8 +197,9 @@ fn main() {
         let mut audio_samples: Vec<f32> = Vec::with_capacity(750);
         let sample_rate = 22050.0;
         let cycles_per_sample = 1_023_000.0 / sample_rate;
+        let target_cycles = if turbo_mode { 17_050 * 5 } else { 17_050 };
 
-        while frame_cycles < 17_050 {
+        while frame_cycles < target_cycles {
             let cycles = machine.step();
             frame_cycles += cycles;
 
