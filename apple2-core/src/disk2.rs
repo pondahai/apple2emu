@@ -145,14 +145,18 @@ impl Disk2 {
                 self.cycles_accumulator -= 32;
                 let track = &mut self.tracks[self.current_track];
                 if track.length > 0 {
-                    if self.write_mode && self.load_mode {
-                        // Q6=1, Q7=1: Write Data to disk surface
+                    if self.load_mode {
+                        // Q7 = 1: Write Mode (Head is energized)
+                        // 不論 Q6=1 (Load) 或 Q6=0 (Shift)，此時絕對不能讀取磁碟表面！
+                        // 在位元組級模擬中，我們在此 32-cycle 邊界將 Latch 寫入磁碟表面
                         track.raw_bytes[self.byte_index] = self.data_latch;
                     } else if !self.write_mode {
-                        // Q6=0: Read mode
+                        // Q7 = 0, Q6 = 0: Read Mode
+                        // 只有雙雙為 0 時，才從磁碟表面讀取資料到 Latch
                         self.data_latch = track.raw_bytes[self.byte_index];
                     }
-                    // Note: If Q6=1 and Q7=0 (Sense WP), do neither read nor write to surface.
+                    // 備註：如果 Q7=0 且 Q6=1 (Sense WP)，則不讀也不寫，僅移動磁頭位置
+
                     self.byte_index = (self.byte_index + 1) % track.length;
                 }
             }
