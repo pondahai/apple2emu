@@ -10,3 +10,5 @@ pub mod disk2;
 mod cpu_test;
 #[cfg(test)]
 mod nibble_test;
+#[cfg(test)]
+mod disk2_test;

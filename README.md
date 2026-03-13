@@ -48,6 +48,8 @@ This emulator is split into a workspace with two main crates:
 - Accurate quarter-track magnetic phase stepper motor emulation.
 - Cycle-accurate rotational delays (~32 CPU cycles per byte) satisfying the tight timing loops of the DOS 3.3 RWTS routines.
 - Read sequencing and GCR (6-and-2 / 4-and-4) decoding capable of fully booting DOS 3.3 raw `.dsk` images into Applesoft BASIC.
+- Write sequencing now supports DOS `SAVE` flow (fixes `ERROR #8` in current in-memory disk model).
+- **Current limitation**: write results are applied to the in-memory nibble tracks only; persisting back to `.dsk` files (denibblize/save-back) is not implemented yet.
 - **Dynamic Disk Loading**: Press `F3` to open a file selection dialog. Supports standard `.dsk`, `.do`, `.po` images and Gzip compressed `.gz` images.
 
 ## Requirements

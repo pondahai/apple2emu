@@ -13,6 +13,7 @@
 * [x] **磁碟寫入支援 (Write Mode & State Sequencer)**
     * 實作 Q6/Q7 寫入狀態機與 32-cycle 寫入迴圈時序同步。
     * 修復 Error #4 (Write Protect) 與 Error #8 (I/O Error) 寫入時序問題。
+    * 目前僅完成「記憶體內磁軌」寫入；尚未回寫原始 `.dsk` 檔案。
 * [ ] **Denibblize 回寫機制**
     * 將記憶體中的磁軌資料 (Nibble) 反解碼回 `.dsk` 格式並存檔。
 * [ ] **非法指令深度補全**

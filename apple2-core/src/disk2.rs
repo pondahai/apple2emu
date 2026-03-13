@@ -18,6 +18,8 @@ pub struct Disk2 {
     pub byte_index: usize,
     pub cycles_accumulator: u32,
     pub data_latch: u8,
+    pub write_ready: bool,
+    pub write_bit_phase: u8,
 }
 
 impl Disk2 {
@@ -30,6 +32,8 @@ impl Disk2 {
             current_qtr_track: 0,
             byte_index: 0, cycles_accumulator: 0,
             data_latch: 0,
+            write_ready: false,
+            write_bit_phase: 0,
         }
     }
 
@@ -59,7 +63,9 @@ impl Disk2 {
                 // If Q7 is ON (load_mode), we are shifting data out,
                 // do NOT destructively read the latch.
                 if self.load_mode {
-                    return self.data_latch; // Return current latch without destroying
+                    let ready = self.write_ready;
+                    self.write_ready = false;
+                    return if ready { 0x80 } else { 0x00 };
                 }
                 
                 let val = self.data_latch;
@@ -67,10 +73,9 @@ impl Disk2 {
                 self.data_latch &= 0x7F;
                 return val;
 
-            } else if switch == 0x0E {
-                // $C0EE (Q7_OFF): Sense WP
-                // Bit 7 is high if write protected. 
-                // We return 0x00 meaning "Not Write Protected" so SAVE can succeed.
+            } else if switch == 0x0D {
+                // Q7=0,Q6=1 write-protect sense path.
+                // Current emulator defaults to writable media.
                 return 0x00; 
             }
         }
@@ -82,11 +87,12 @@ impl Disk2 {
 
     pub fn write_io(&mut self, addr: u16, data: u8) { 
         self.handle_io(addr); 
+        let switch = addr & 0x0F;
         
         // When Q7=1 (load_mode) and Q6=1 (write_mode), we are in Write Load state.
         // The data bus is loaded into the controller's data register.
-        // This is typically triggered by a write to $C0EF (or any $C0EX where Q6/Q7=1)
-        if self.load_mode && self.write_mode {
+        // Latch loads on Q6_ON ($C0ED) writes.
+        if self.load_mode && self.write_mode && switch == 0x0D {
             self.data_latch = data;
         }
     }
@@ -106,7 +112,12 @@ impl Disk2 {
             0x09 => self.motor_on = true,
             0x0A => self.drive_select = 1,
             0x0B => self.drive_select = 2,
-            0x0C => self.write_mode = false,
+            0x0C => {
+                if self.load_mode && self.write_mode {
+                    self.write_bit_phase = 0;
+                }
+                self.write_mode = false;
+            }
             0x0D => self.write_mode = true,
             0x0E => self.load_mode = false,
             0x0F => self.load_mode = true,
@@ -133,7 +144,6 @@ impl Disk2 {
             let nt = (self.current_qtr_track / 4) as usize;
             if self.current_track != nt {
                 self.current_track = nt;
-                self.byte_index = 0; 
             }
         }
     }
@@ -141,23 +151,41 @@ impl Disk2 {
     pub fn tick(&mut self, cycles: u32) {
         if self.motor_on && self.is_disk_loaded {
             self.cycles_accumulator += cycles;
-            while self.cycles_accumulator >= 32 {
-                self.cycles_accumulator -= 32;
-                let track = &mut self.tracks[self.current_track];
-                if track.length > 0 {
-                    if self.load_mode {
-                        // Q7 = 1: Write Mode (Head is energized)
-                        // 不論 Q6=1 (Load) 或 Q6=0 (Shift)，此時絕對不能讀取磁碟表面！
-                        // 在位元組級模擬中，我們在此 32-cycle 邊界將 Latch 寫入磁碟表面
-                        track.raw_bytes[self.byte_index] = self.data_latch;
-                    } else if !self.write_mode {
-                        // Q7 = 0, Q6 = 0: Read Mode
-                        // 只有雙雙為 0 時，才從磁碟表面讀取資料到 Latch
-                        self.data_latch = track.raw_bytes[self.byte_index];
-                    }
-                    // 備註：如果 Q7=0 且 Q6=1 (Sense WP)，則不讀也不寫，僅移動磁頭位置
 
-                    self.byte_index = (self.byte_index + 1) % track.length;
+            if self.load_mode && !self.write_mode {
+                // Q7=1,Q6=0: shift write stream at bit granularity (4 cycles/bit).
+                while self.cycles_accumulator >= 4 {
+                    self.cycles_accumulator -= 4;
+                    let track = &mut self.tracks[self.current_track];
+                    if track.length == 0 {
+                        continue;
+                    }
+                    let bit_pos = 7 - self.write_bit_phase;
+                    let bit = (self.data_latch >> bit_pos) & 1;
+                    if bit != 0 {
+                        track.raw_bytes[self.byte_index] |= 1 << bit_pos;
+                    } else {
+                        track.raw_bytes[self.byte_index] &= !(1 << bit_pos);
+                    }
+                    self.write_bit_phase += 1;
+                    if self.write_bit_phase >= 8 {
+                        self.write_bit_phase = 0;
+                        self.write_ready = true;
+                        self.byte_index = (self.byte_index + 1) % track.length;
+                    }
+                }
+            } else {
+                while self.cycles_accumulator >= 32 {
+                    self.cycles_accumulator -= 32;
+                    let track = &mut self.tracks[self.current_track];
+                    if track.length > 0 {
+                        if !self.write_mode {
+                            // Q7 = 0, Q6 = 0: Read Mode
+                            self.data_latch = track.raw_bytes[self.byte_index];
+                        }
+                        // Other states only advance rotational position.
+                        self.byte_index = (self.byte_index + 1) % track.length;
+                    }
                 }
             }
         }
@@ -166,6 +194,8 @@ impl Disk2 {
     pub fn reset(&mut self) {
         self.motor_on = false; self.current_track = 0; self.byte_index = 0;
         self.cycles_accumulator = 0; self.data_latch = 0;
+        self.write_ready = false;
+        self.write_bit_phase = 0;
         self.phases = [false; 4]; self.current_qtr_track = 0;
     }
 }
