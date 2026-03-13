@@ -14,7 +14,14 @@ taskkill /F /IM apple2-desktop.exe /T ; cargo run --bin apple2-desktop --quiet
 ### 2. 驗證工具
 ```powershell
 cargo run --bin verify_nibble --quiet
+cargo run --bin save_smoke --quiet
 ```
+
+## 近期更新 (2026-03-13)
+- **Disk SAVE 穩定**：`ERROR #8` 已修正（位元級寫入節奏 + end-to-end smoke 驗證）。
+- **F4 速度模式**：改為 `1x -> 2x -> 3x -> 4x -> 5x -> 1x` 循環。
+- **超頻音訊**：高倍率下不再用 `sink.clear()` 強制清空，減少調速後無聲問題。
+- **壓縮磁碟支援**：`.dsk.gz` 載入路徑已修正（自動解壓後載入）。
 
 ## 目前狀態 (2026-03-12) - **重大突破**
 - **Disk II (已成功)**: 

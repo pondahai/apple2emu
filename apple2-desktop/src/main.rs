@@ -1,14 +1,48 @@
 use std::time::Instant;
+use std::io::Read;
 use minifb::{Key, Window, WindowOptions};
 use apple2_core::machine::Apple2Machine;
 use apple2_core::video::{Video, SCREEN_WIDTH, SCREEN_HEIGHT};
 use apple2_core::memory::Memory;
 use rodio::{OutputStream, Sink};
+use flate2::read::GzDecoder;
 
 mod config;
 use config::EmulatorConfig;
 
+fn decode_disk_image(path: &std::path::Path, raw_data: Vec<u8>) -> Result<Vec<u8>, String> {
+    let is_gz_ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("gz"))
+        .unwrap_or(false);
+    let is_gz_magic = raw_data.len() >= 2 && raw_data[0] == 0x1F && raw_data[1] == 0x8B;
+
+    let disk = if is_gz_ext || is_gz_magic {
+        let mut decoder = GzDecoder::new(raw_data.as_slice());
+        let mut out = Vec::new();
+        decoder
+            .read_to_end(&mut out)
+            .map_err(|e| format!("Failed to decompress {}: {}", path.display(), e))?;
+        out
+    } else {
+        raw_data
+    };
+
+    if disk.len() != 143360 {
+        return Err(format!(
+            "Disk size mismatch for {}: {} (expected 143360 bytes)",
+            path.display(),
+            disk.len()
+        ));
+    }
+    Ok(disk)
+}
+
 fn main() {
+    const BASE_FRAME_CYCLES: u32 = 17_050;
+    const MAX_SPEED_MULTIPLIER: u32 = 5;
+
     println!("Starting Apple II Emulator targeting Windows (minifb) and core no_std...");
 
     let mut config = EmulatorConfig::load();
@@ -97,13 +131,14 @@ fn main() {
     }
 
     match std::fs::read(&dsk_path) {
-        Ok(disk_image) => {
-            if disk_image.len() == 143360 {
-                cached_disk_image = Some(disk_image.clone());
-                machine.mem.disk2.load_disk(&disk_image);
-                println!("Loaded floppy image from {}: 140KB", dsk_path.display());
-            } else {
-                println!("WARNING: Disk size mismatch for {}: {}", dsk_path.display(), disk_image.len());
+        Ok(raw_data) => {
+            match decode_disk_image(&dsk_path, raw_data) {
+                Ok(disk_image) => {
+                    cached_disk_image = Some(disk_image.clone());
+                    machine.mem.disk2.load_disk(&disk_image);
+                    println!("Loaded floppy image from {}: 140KB", dsk_path.display());
+                }
+                Err(e) => println!("WARNING: {}", e),
             }
         }
         Err(e) => println!("ERROR: Could not open {}: {}", dsk_path.display(), e),
@@ -129,7 +164,7 @@ fn main() {
     let mut last_f2_down = false;
     let mut last_f3_down = false;
     let mut last_f4_down = false;
-    let mut turbo_mode = false;
+    let mut speed_multiplier: u32 = 1;
     let mut unprocessed_cycles: f32 = 0.0;
     let mut dc_filter_x1: f32 = 0.0;
     let mut dc_filter_y1: f32 = 0.0;
@@ -229,11 +264,16 @@ fn main() {
                 .pick_file();
             if let Some(path) = file {
                 if let Ok(raw_data) = std::fs::read(&path) {
-                    cached_disk_image = Some(raw_data.clone());
-                    machine.mem.disk2.load_disk(&raw_data);
-                    println!("Successfully loaded disk: {:?}", path.file_name().unwrap_or_default());
-                    config.last_disk_path = Some(path);
-                    config.save();
+                    match decode_disk_image(&path, raw_data) {
+                        Ok(disk_image) => {
+                            cached_disk_image = Some(disk_image.clone());
+                            machine.mem.disk2.load_disk(&disk_image);
+                            println!("Successfully loaded disk: {:?}", path.file_name().unwrap_or_default());
+                            config.last_disk_path = Some(path);
+                            config.save();
+                        }
+                        Err(e) => println!("ERROR: {}", e),
+                    }
                 }
             }
         }
@@ -241,8 +281,10 @@ fn main() {
 
         let f4_down = window.is_key_down(Key::F4);
         if f4_down && !last_f4_down {
-            turbo_mode = !turbo_mode;
-            println!(">>> Turbo Mode: {}", if turbo_mode { "ON" } else { "OFF" });
+            speed_multiplier = if speed_multiplier >= MAX_SPEED_MULTIPLIER { 1 } else { speed_multiplier + 1 };
+            let turbo_mode = speed_multiplier > 1;
+            window.set_target_fps(if turbo_mode { 120 } else { 60 });
+            println!(">>> Speed Mode: CPU x{}", speed_multiplier);
         }
         last_f4_down = f4_down;
 
@@ -257,7 +299,8 @@ fn main() {
         let mut audio_samples: Vec<f32> = Vec::with_capacity(750);
         let sample_rate = 22050.0;
         let cycles_per_sample = 1_023_000.0 / sample_rate;
-        let target_cycles = if turbo_mode { 17_050 * 5 } else { 17_050 };
+        let turbo_mode = speed_multiplier > 1;
+        let target_cycles = BASE_FRAME_CYCLES * speed_multiplier;
 
         while frame_cycles < target_cycles {
             let cycles = machine.step();
@@ -279,50 +322,52 @@ fn main() {
             if !audio_samples.is_empty() {
                 // To prevent chopped audio, we want to maintain a healthy backlog ahead of the soundcard.
                 let buf_len = s.len();
+                let max_buf = if turbo_mode { 30 } else { 15 };
 
-                // If queue is absurdly long (emulator dragging/paused), clear and resync
-                if buf_len > 15 {
-                    s.clear();
-                }
-
-                // If the queue is running dry (under 2 frames), we inject a tiny bit of silence
-                // to give the emulator a moment to catch up, preventing hard clipping.
-                if buf_len == 0 {
-                    let mut padding = vec![0.0; (sample_rate / 60.0) as usize];
-                    // smoothly transition the padding into silence
-                    for x in padding.iter_mut() {
-                        *x = dc_filter_y1;
-                        dc_filter_y1 *= 0.995;
+                // Avoid hard-clearing the queue (can cause audible dropouts). If backlog is high,
+                // skip appending this frame and let the device catch up naturally.
+                if buf_len <= max_buf {
+                    // If the queue is running dry (under 2 frames), we inject a tiny bit of silence
+                    // to give the emulator a moment to catch up, preventing hard clipping.
+                    if buf_len == 0 {
+                        let mut padding = vec![0.0; (sample_rate / 60.0) as usize];
+                        // smoothly transition the padding into silence
+                        for x in padding.iter_mut() {
+                            *x = dc_filter_y1;
+                            dc_filter_y1 *= 0.995;
+                        }
+                        let pad_source = rodio::buffer::SamplesBuffer::new(1, sample_rate as u32, padding);
+                        s.append(pad_source);
                     }
-                    let pad_source = rodio::buffer::SamplesBuffer::new(1, sample_rate as u32, padding);
-                    s.append(pad_source);
-                }
 
-                let source = rodio::buffer::SamplesBuffer::new(1, sample_rate as u32, audio_samples);
-                s.append(source);
+                    let source = rodio::buffer::SamplesBuffer::new(1, sample_rate as u32, audio_samples);
+                    s.append(source);
+                }
             }
         }
 
         // Periodic Debug
         static mut FRAME_COUNT: u32 = 0;
-        unsafe {
-            FRAME_COUNT += 1;
-            if FRAME_COUNT % 60 == 0 {
-                let mut row_data = String::new();
-                for i in 0..32 { row_data.push_str(&format!("{:02X} ", machine.mem.read(0x0800 + i))); }
-                let mut vec_data = String::new();
-                for i in 0..32 { vec_data.push_str(&format!("{:02X} ", machine.mem.read(0x03D0 + i))); }
-                let mut buf_data = String::new();
-                for i in 0..16 { buf_data.push_str(&format!("{:02X} ", machine.mem.read(0x0200 + i))); }
-                
-                println!("Disk: T{} Index={} Latch={:02X}", 
-                    machine.mem.disk2.current_track, machine.mem.disk2.byte_index, machine.mem.disk2.data_latch);
-                println!("Memory at $0800: {}", row_data);
-                println!("Vectors at $03D0: {}", vec_data);
-                println!("Buffer at $0200: {}", buf_data);
-                println!("CPU PC: {:04X} A:{:02X} X:{:02X} Y:{:02X} S:{:02X} P:{:02X}", 
-                    machine.cpu.pc, machine.cpu.a, machine.cpu.x, machine.cpu.y, machine.cpu.sp, 
-                    machine.cpu.status.to_byte());
+        if !turbo_mode {
+            unsafe {
+                FRAME_COUNT += 1;
+                if FRAME_COUNT % 60 == 0 {
+                    let mut row_data = String::new();
+                    for i in 0..32 { row_data.push_str(&format!("{:02X} ", machine.mem.read(0x0800 + i))); }
+                    let mut vec_data = String::new();
+                    for i in 0..32 { vec_data.push_str(&format!("{:02X} ", machine.mem.read(0x03D0 + i))); }
+                    let mut buf_data = String::new();
+                    for i in 0..16 { buf_data.push_str(&format!("{:02X} ", machine.mem.read(0x0200 + i))); }
+                    
+                    println!("Disk: T{} Index={} Latch={:02X}", 
+                        machine.mem.disk2.current_track, machine.mem.disk2.byte_index, machine.mem.disk2.data_latch);
+                    println!("Memory at $0800: {}", row_data);
+                    println!("Vectors at $03D0: {}", vec_data);
+                    println!("Buffer at $0200: {}", buf_data);
+                    println!("CPU PC: {:04X} A:{:02X} X:{:02X} Y:{:02X} S:{:02X} P:{:02X}", 
+                        machine.cpu.pc, machine.cpu.a, machine.cpu.x, machine.cpu.y, machine.cpu.sp, 
+                        machine.cpu.status.to_byte());
+                }
             }
         }
 
@@ -337,7 +382,7 @@ fn main() {
 
         window.update_with_buffer(&video.frame_buffer, SCREEN_WIDTH, SCREEN_HEIGHT).unwrap();
 
-        if last_cycle.elapsed().as_secs() >= 1 {
+        if !turbo_mode && last_cycle.elapsed().as_secs() >= 1 {
             // Print screen rows
             for row in 0..24 {
                 let base: usize = 0x0400;

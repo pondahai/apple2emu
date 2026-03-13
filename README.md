@@ -80,6 +80,7 @@ cargo run --bin apple2-desktop
 - **`F2`**: **Reboot**. Restarts the emulator and performs a clean boot from disk (simulates a power-on).
 - **`Ctrl + Delete`**: **System Reset**. Simulates the physical `Reset` key on an Apple II (warm reset).
 - **`F3`**: **Load Disk Image**. Opens a system file dialog to choose a `.dsk` or `.gz` disk image.
+- **`F4`**: **Speed Cycle**. Cycles CPU speed through **1x → 2x → 3x → 4x → 5x → 1x** and relaxes frame/audio/debug overhead when above 1x.
 - **`Ctrl + V`**: **Paste Text**. Inject text from your host clipboard directly into the Apple II keyboard stream.
 - **Monitor**: To enter the Monitor manually from BASIC, type `CALL -151`.
 - **BASIC**: To enter AppleSoft BASIC from the Monitor (`*`), type `Ctrl+B` and press `Enter`.
