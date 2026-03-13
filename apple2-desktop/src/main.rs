@@ -5,8 +5,13 @@ use apple2_core::video::{Video, SCREEN_WIDTH, SCREEN_HEIGHT};
 use apple2_core::memory::Memory;
 use rodio::{OutputStream, Sink};
 
+mod config;
+use config::EmulatorConfig;
+
 fn main() {
     println!("Starting Apple II Emulator targeting Windows (minifb) and core no_std...");
+
+    let mut config = EmulatorConfig::load();
 
     // Create the Windows window
     let mut window = Window::new(
@@ -78,14 +83,20 @@ fn main() {
     }
 
     // Load Disk Image
-    let dsk_path = roms_dir.join("MASTER.DSK");
+    let mut dsk_path = roms_dir.join("MASTER.DSK");
+    if let Some(ref last_path) = config.last_disk_path {
+        if last_path.exists() {
+            dsk_path = last_path.clone();
+        }
+    }
+
     match std::fs::read(&dsk_path) {
         Ok(disk_image) => {
             if disk_image.len() == 143360 {
                 machine.mem.disk2.load_disk(&disk_image);
-                println!("Loaded MASTER.DSK floppy image: 140KB");
+                println!("Loaded floppy image from {}: 140KB", dsk_path.display());
             } else {
-                println!("WARNING: MASTER.DSK size mismatch: {}", disk_image.len());
+                println!("WARNING: Disk size mismatch for {}: {}", dsk_path.display(), disk_image.len());
             }
         }
         Err(e) => println!("ERROR: Could not open {}: {}", dsk_path.display(), e),
@@ -174,6 +185,8 @@ fn main() {
                 if let Ok(raw_data) = std::fs::read(&path) {
                     machine.mem.disk2.load_disk(&raw_data);
                     println!("Successfully loaded disk: {:?}", path.file_name().unwrap_or_default());
+                    config.last_disk_path = Some(path);
+                    config.save();
                 }
             }
         }
