@@ -195,7 +195,13 @@ fn main() {
         }
 
         if window.is_key_down(Key::F2) && !last_f2_down {
-            machine.power_on();
+            if ctrl_down {
+                println!(">>> SYSTEM RESET (Warm Boot)");
+                machine.reset();
+            } else {
+                println!(">>> REBOOT (Cold Boot)");
+                machine.power_on();
+            }
         }
         last_f2_down = window.is_key_down(Key::F2);
 
