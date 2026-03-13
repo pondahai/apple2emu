@@ -169,7 +169,7 @@ fn main() {
     let mut dc_filter_x1: f32 = 0.0;
     let mut dc_filter_y1: f32 = 0.0;
 
-    while window.is_open() && !window.is_key_down(Key::Escape) {
+    while window.is_open() && !window.is_key_down(Key::F10) {
         // Handle Input
         let current_keys = window.get_keys();
         let mut keys = Vec::new();
@@ -230,10 +230,13 @@ fn main() {
                 Key::Apostrophe => if shift_down { b'"' } else { b'\'' },
 
                 // Control Keys
-                Key::Space => b' ', Key::Enter => 0x0D, Key::Backspace => 0x08,
+                Key::Space => b' ', Key::Enter => 0x0D, Key::Backspace => 0x08, Key::Escape => 0x1B,
                 _ => 0,
             };
-            if ascii != 0 { key_queue.push_back(ascii); }
+            if ascii != 0 { 
+                println!("Key Pressed: {:?} -> ASCII {:02X}", key, ascii);
+                key_queue.push_back(ascii); 
+            }
         }
 
         if window.is_key_down(Key::F2) && !last_f2_down {
