@@ -83,6 +83,7 @@ cargo run --bin apple2-desktop
 - **`F3`**: **Load Disk Image**. Opens a system file dialog to choose a `.dsk` or `.gz` disk image.
 - **`F4`**: **Speed Cycle**. Cycles CPU speed through **1x → 2x → 3x → 4x → 5x → 1x** and relaxes frame/audio/debug overhead when above 1x.
 - **Disk Motor Auto Turbo**: While the Disk II motor is on, the window title shows **`AUTO TURBO UNTHROTTLED`** and the frontend runs unthrottled. When the motor stops, it falls back to the current `F4` speed mode.
+- **Joystick**: Arrow keys drive Paddle 0/1 (X/Y). `Left Alt` maps to Pushbutton 0, `Right Alt` maps to Pushbutton 1.
 - **`Ctrl + V`**: **Paste Text**. Inject text from your host clipboard directly into the Apple II keyboard stream.
 - **Monitor**: To enter the Monitor manually from BASIC, type `CALL -151`.
 - **BASIC**: To enter AppleSoft BASIC from the Monitor (`*`), type `Ctrl+B` and press `Enter`.

@@ -39,6 +39,11 @@ pub struct Apple2Memory {
     pub cpu_step_cycle_cursor: u32,
     pub cpu_step_audio_active: bool,
 
+    // Joystick / Paddle input
+    pub pushbuttons: [bool; 2],
+    pub paddles: [u8; 4],
+    pub paddle_latch_cycle: u64,
+
     // Language Card (16K RAM at $D000-$FFFF)
     pub lc_ram: [u8; 16384],
     pub lc_read_enable: bool,
@@ -63,6 +68,9 @@ impl Apple2Memory {
             cpu_step_cycle_base: 0,
             cpu_step_cycle_cursor: 0,
             cpu_step_audio_active: false,
+            pushbuttons: [false; 2],
+            paddles: [127; 4],
+            paddle_latch_cycle: 0,
             lc_ram: [0; 16384],
             lc_read_enable: false,
             lc_write_enable: false,
@@ -88,6 +96,9 @@ impl Apple2Memory {
         self.cpu_step_cycle_base = 0;
         self.cpu_step_cycle_cursor = 0;
         self.cpu_step_audio_active = false;
+        self.pushbuttons = [false; 2];
+        self.paddles = [127; 4];
+        self.paddle_latch_cycle = 0;
         self.disk2.reset();
 
         self.lc_read_enable = false;
@@ -122,6 +133,13 @@ impl Apple2Memory {
         core::mem::take(&mut self.speaker_toggle_cycles)
     }
 
+    pub fn set_joystick_state(&mut self, x: u8, y: u8, button0: bool, button1: bool) {
+        self.paddles[0] = x;
+        self.paddles[1] = y;
+        self.pushbuttons[0] = button0;
+        self.pushbuttons[1] = button1;
+    }
+
     fn record_bus_access_cycle(&mut self) -> Option<u64> {
         if !self.cpu_step_audio_active {
             return None;
@@ -137,6 +155,35 @@ impl Apple2Memory {
         self.speaker = !self.speaker;
         if let Some(c) = cycle {
             self.speaker_toggle_cycles.push(c);
+        }
+    }
+
+    fn current_io_cycle(&self, access_cycle: Option<u64>) -> u64 {
+        access_cycle.unwrap_or(self.cpu_step_cycle_base + self.cpu_step_cycle_cursor as u64)
+    }
+
+    fn latch_paddles(&mut self, access_cycle: Option<u64>) {
+        self.paddle_latch_cycle = self.current_io_cycle(access_cycle);
+    }
+
+    fn read_pushbutton(&self, index: usize) -> u8 {
+        if self.pushbuttons[index] {
+            0x80
+        } else {
+            0x00
+        }
+    }
+
+    fn paddle_timeout_cycles(value: u8) -> u64 {
+        8 + (value as u64 * 11)
+    }
+
+    fn read_paddle(&self, index: usize, access_cycle: Option<u64>) -> u8 {
+        let elapsed = self.current_io_cycle(access_cycle).saturating_sub(self.paddle_latch_cycle);
+        if elapsed < Self::paddle_timeout_cycles(self.paddles[index]) {
+            0x80
+        } else {
+            0x00
         }
     }
 }
@@ -228,11 +275,14 @@ impl Memory for Apple2Memory {
                     0xC600..=0xC6FF => self.disk2.rom[(addr - 0xC600) as usize],
 
                     // Pushbuttons / Joystick / Paddles
-                    // $C061 (Pushbutton 0), $C062 (Pushbutton 1) -> 0x00 (Not pressed)
-                    // $C064-$C067 (Analog Paddles) -> For simplicity, return 0x00 (Timeout immediately)
-                    // Wait, returning 0x00 immediately for paddles might crash calibration loops.
-                    // Let's return 0x00 for now, but if it crashes we might need a proper timer.
-                    0xC061..=0xC067 => 0x00,
+                    0xC061 => self.read_pushbutton(0),
+                    0xC062 => self.read_pushbutton(1),
+                    0xC063 => 0x00,
+                    0xC064..=0xC067 => self.read_paddle((addr - 0xC064) as usize, access_cycle),
+                    0xC070 => {
+                        self.latch_paddles(access_cycle);
+                        0x00
+                    }
 
                     // For now, other I/O returns 0 (Video switches, Disk II, etc.)
                     _ => 0,
@@ -323,6 +373,9 @@ impl Memory for Apple2Memory {
                     // Speaker toggle ($C030)
                     0xC030 => {
                         self.toggle_speaker(access_cycle);
+                    }
+                    0xC070 => {
+                        self.latch_paddles(access_cycle);
                     }
 
                     _ => {}

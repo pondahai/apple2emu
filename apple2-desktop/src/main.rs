@@ -128,6 +128,30 @@ fn rebuild_sink(audio_handle: Option<&OutputStreamHandle>) -> Option<Sink> {
     audio_handle.and_then(|handle| Sink::try_new(handle).ok())
 }
 
+fn joystick_axis(negative_pressed: bool, positive_pressed: bool) -> u8 {
+    match (negative_pressed, positive_pressed) {
+        (true, false) => 0,
+        (false, true) => 255,
+        _ => 127,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn alt_buttons() -> (bool, bool) {
+    use winapi::um::winuser::{GetAsyncKeyState, VK_LMENU, VK_RMENU};
+
+    unsafe {
+        let left = (GetAsyncKeyState(VK_LMENU) as u16 & 0x8000) != 0;
+        let right = (GetAsyncKeyState(VK_RMENU) as u16 & 0x8000) != 0;
+        (left, right)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn alt_buttons() -> (bool, bool) {
+    (false, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::AudioMixerState;
@@ -308,6 +332,20 @@ fn main() {
         last_keys = current_keys;
         let ctrl_down = window.is_key_down(Key::LeftCtrl) || window.is_key_down(Key::RightCtrl);
         let shift_down = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
+        let joystick_x = joystick_axis(
+            window.is_key_down(Key::Left),
+            window.is_key_down(Key::Right),
+        );
+        let joystick_y = joystick_axis(
+            window.is_key_down(Key::Up),
+            window.is_key_down(Key::Down),
+        );
+        let (left_alt_down, right_alt_down) = alt_buttons();
+        let joystick_button_0 = left_alt_down || window.is_key_down(Key::LeftAlt);
+        let joystick_button_1 = right_alt_down || window.is_key_down(Key::RightAlt);
+        machine
+            .mem
+            .set_joystick_state(joystick_x, joystick_y, joystick_button_0, joystick_button_1);
 
         for &key in keys.iter() {
             let ascii = match key {

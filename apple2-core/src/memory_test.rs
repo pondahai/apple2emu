@@ -28,4 +28,36 @@ mod tests {
         assert!(!mem.speaker);
         assert_eq!(mem.take_speaker_toggle_cycles(), vec![43, 45]);
     }
+
+    #[test]
+    fn pushbutton_reads_set_bit7_when_pressed() {
+        let mut mem = Apple2Memory::new();
+        mem.set_joystick_state(127, 127, true, false);
+
+        mem.begin_cpu_step(0);
+        let pb0 = mem.read(0xC061);
+        let pb1 = mem.read(0xC062);
+        mem.end_cpu_step();
+
+        assert_eq!(pb0, 0x80);
+        assert_eq!(pb1, 0x00);
+    }
+
+    #[test]
+    fn paddle_reads_stay_high_until_timeout_after_strobe() {
+        let mut mem = Apple2Memory::new();
+        mem.set_joystick_state(255, 0, false, false);
+
+        mem.begin_cpu_step(100);
+        let _ = mem.read(0xC070);
+        let early = mem.read(0xC064);
+        mem.end_cpu_step();
+
+        mem.begin_cpu_step(3_000);
+        let late = mem.read(0xC064);
+        mem.end_cpu_step();
+
+        assert_eq!(early, 0x80);
+        assert_eq!(late, 0x00);
+    }
 }
