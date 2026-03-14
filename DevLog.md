@@ -711,3 +711,58 @@
   * `cargo test -p apple2-core disk2_test -- --nocapture`：通過。
 * **目前結論**：
   * 這版 `auto turbo` 體感效果良好，可作為目前桌面版的預設磁碟加速策略。
+
+## 38. 修正 `F3` 換磁碟與 `F2` 重開後音訊狀態錯亂 (2026-03-14)
+* **問題現象**：
+  * 按 `F3` 換磁碟後，聲音會直接消失。
+  * 第一輪修正後，`F3` 恢復正常，但 `F2` cold boot 之後開機 beep 又消失。
+* **根因**：
+  * `apple2-desktop/src/main.rs` 的 `AudioMixerState` 在 `F2/F3` 事件後被重設到 `cycle 0`，
+    但 emulator 的 `machine.total_cycles` 並沒有同步歸零。
+  * 此外，`rodio::Sink` 只在程式啟動時建立一次；`F2/F3` 後如果沿用舊 sink，
+    舊 queue/backlog 會把短促的 boot beep 吃掉。
+* **實作**：
+  * 將 mixer 重設改為 `reset_at(current_cycle, cycles_per_sample, speaker_on)`，
+    直接對齊當前 CPU cycle，而不是硬回到 `0`。
+  * 在 `F2/F3` 路徑改成重建新的 `rodio::Sink`，讓音訊輸出狀態更接近「程式剛啟動」。
+  * 補了一個 desktop 單元測試，確認 `reset_at()` 會把 mixer 對齊到指定 cycle。
+* **驗證**：
+  * `cargo test -p apple2-desktop --bin apple2-desktop -- --nocapture`：通過。
+  * 實機確認：
+    * `F3` 換磁碟後聲音恢復。
+    * `F2` cold boot 後 boot beep 恢復。
+* **提交**：
+  * `ecd3160` `Fix audio reset after disk swap and reboot`
+
+## 39. 新增 Apple II joystick 模擬，並修正 Windows `Alt` 無法當按鈕 (2026-03-15)
+* **需求**：
+  * 用鍵盤方向鍵模擬 Apple II 搖桿。
+  * 按鈕維持用 `Alt`，避免佔用一般 Apple II 鍵盤字元。
+* **core 端實作**：
+  * 在 `apple2-core/src/memory.rs` 加入 joystick 狀態：
+    * `pushbuttons[2]`
+    * `paddles[4]`
+    * `paddle_latch_cycle`
+  * 補上 Apple II game I/O 行為：
+    * `$C061/$C062` 回傳 pushbutton bit 7
+    * `$C064-$C067` 依 paddle timeout window 回傳 bit 7
+    * `$C070` 會重新 strobe paddle timer
+  * 新增 `memory_test`：
+    * pushbutton bit 7 測試
+    * paddle strobe/timeout 測試
+* **desktop 端實作**：
+  * 方向鍵直接映射到 Paddle 0/1 的 X/Y。
+  * `Left Alt` / `Right Alt` 映射到 Pushbutton 0/1。
+* **關鍵發現**：
+  * `minifb` 在 Windows 的鍵盤 scan code 映射裡沒有正確把 `Alt` 接到
+    `Key::LeftAlt/RightAlt`，導致 `window.is_key_down(Key::LeftAlt)` 永遠抓不到。
+  * 因此桌面前端額外使用 Win32 `GetAsyncKeyState(VK_LMENU/VK_RMENU)` 直接讀取 `Alt` 狀態。
+* **驗證**：
+  * `cargo test -p apple2-core memory_test -- --nocapture`：通過。
+  * `cargo test -p apple2-desktop --bin apple2-desktop -- --nocapture`：通過。
+  * 實機確認：
+    * 一般鍵盤輸入正常。
+    * `Alt` 搖桿按鈕正常。
+    * 某些遊戲中右/下方向仍可能有相容性問題，這部分尚未修。
+* **提交**：
+  * `9ce6a27` `Add joystick emulation with Alt button support`
