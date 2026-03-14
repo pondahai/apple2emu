@@ -84,3 +84,11 @@
 * **虛擬搖桿防卡死 (Dummy Joystick)**：為 `$C061`~`$C067`（搖桿與按鈕）提供預設回應，避免部分老遊戲在啟動的校準迴圈中無限死結。
 * **高傳真音訊積分 (Cycle-Accurate Audio Integration)**：放棄單純的定點採樣，改用「指令級佔空比積分 (Instruction-level Duty Cycle Integration)」並將採樣率提升至 44.1kHz。這將原本會產生頻率混疊的 PWM 高頻切換正確還原成白雜訊，完美修復了《德軍總部》等遊戲中槍聲變成嗶嗶聲的問題。
 
+## 17. 磁碟系統架構哲學探討 (2026-03-13)
+* **High-Level Emulation (Fast Disk) vs Low-Level Emulation**：
+  * 討論了為何不採用「攔截 DOS 3.3 RWTS 呼叫 (High-Level Patching)」來實現磁碟加速（Fast Disk）。
+  * **界線模糊**：Disk II 控制卡上的 `DISK2.ROM` (256 bytes) 僅負責將磁軌 0 磁區 0 (Stage 1 Bootloader) 載入 `$0800`，而真正的尋軌、讀寫、解碼邏輯 (RWTS) 是實作在被載入的作業系統 (如 DOS 3.3, 位於 `$BD00`) 或是遊戲自帶的客製化載入器中。
+  * **相容性考量**：如果將控制卡當作「黑盒子」並攔截標準的 DOS 呼叫直接從 `.dsk` 複製資料，將會導致 90% 以上具有防拷保護（修改了 RWTS、Sync Bytes 或依賴特定硬體時序）的商業遊戲當機。
+  * **結論**：本模擬器堅持採用 **Low-Level / Cycle-Accurate Emulation**。讓虛擬的 6502 CPU 執行真實的查表與 XOR 解碼，並在 `$C0EC` 提供精準的 32 週期位元組鎖存。這是確保所有標準 DOS 與極限防拷軟體皆能正常運作的唯一途徑。
+
+
