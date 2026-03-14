@@ -124,11 +124,23 @@ fn decode_disk_image(path: &std::path::Path, raw_data: Vec<u8>) -> Result<Vec<u8
     Ok(disk[..EXPECTED_DSK_BYTES].to_vec())
 }
 
+fn update_window_title(window: &mut Window, speed_multiplier: u32, auto_disk_turbo_active: bool) {
+    let title = if auto_disk_turbo_active {
+        "Apple II Emulator (Rust no_std core) [AUTO TURBO UNTHROTTLED]".to_string()
+    } else if speed_multiplier > 1 {
+        format!(
+            "Apple II Emulator (Rust no_std core) [MANUAL TURBO x{}]",
+            speed_multiplier
+        )
+    } else {
+        "Apple II Emulator (Rust no_std core)".to_string()
+    };
+    window.set_title(&title);
+}
+
 fn main() {
     const BASE_FRAME_CYCLES: u32 = 17_050;
     const MAX_SPEED_MULTIPLIER: u32 = 5;
-    const AUTO_DISK_TURBO_HOLD_FRAMES: u32 = 12;
-    const AUTO_DISK_TURBO_IO_THRESHOLD: u64 = 96;
 
     println!("Starting Apple II Emulator targeting Windows (minifb) and core no_std...");
 
@@ -258,11 +270,10 @@ fn main() {
     let mut last_f3_down = false;
     let mut last_f4_down = false;
     let mut speed_multiplier: u32 = 1;
-    let mut last_disk_io_access_count = machine.mem.disk2.io_access_count;
-    let mut auto_disk_turbo_frames = 0u32;
     let mut dc_filter_x1: f32 = 0.0;
     let mut dc_filter_y1: f32 = 0.0;
     let mut audio_mixer = AudioMixerState::new(machine.mem.speaker);
+    update_window_title(&mut window, speed_multiplier, false);
 
     while window.is_open() && !window.is_key_down(Key::F10) {
         // Handle Input
@@ -618,8 +629,6 @@ fn main() {
             audio_mixer.reset(machine.mem.speaker);
             dc_filter_x1 = 0.0;
             dc_filter_y1 = 0.0;
-            last_disk_io_access_count = machine.mem.disk2.io_access_count;
-            auto_disk_turbo_frames = 0;
         }
         last_f2_down = window.is_key_down(Key::F2);
 
@@ -637,8 +646,6 @@ fn main() {
                             audio_mixer.reset(machine.mem.speaker);
                             dc_filter_x1 = 0.0;
                             dc_filter_y1 = 0.0;
-                            last_disk_io_access_count = machine.mem.disk2.io_access_count;
-                            auto_disk_turbo_frames = 0;
                             println!(
                                 "Successfully loaded disk: {:?}",
                                 path.file_name().unwrap_or_default()
@@ -663,6 +670,7 @@ fn main() {
             let turbo_mode = speed_multiplier > 1;
             window.set_target_fps(if turbo_mode { 120 } else { 60 });
             println!(">>> Speed Mode: CPU x{}", speed_multiplier);
+            update_window_title(&mut window, speed_multiplier, machine.mem.disk2.motor_on);
         }
         last_f4_down = f4_down;
 
@@ -672,31 +680,31 @@ fn main() {
             }
         }
 
-        let disk_io_delta = machine
-            .mem
-            .disk2
-            .io_access_count
-            .wrapping_sub(last_disk_io_access_count);
-        last_disk_io_access_count = machine.mem.disk2.io_access_count;
-        if machine.mem.disk2.motor_on && disk_io_delta >= AUTO_DISK_TURBO_IO_THRESHOLD {
-            auto_disk_turbo_frames = AUTO_DISK_TURBO_HOLD_FRAMES;
-        } else if auto_disk_turbo_frames > 0 {
-            auto_disk_turbo_frames -= 1;
-        }
-
         // Emulate CPU execution for one Frame
         let mut frame_cycles = 0;
         let mut audio_samples: Vec<f32> = Vec::with_capacity(1500);
         let sample_rate: u32 = 44_100;
         let cycles_per_sample = 1_023_000.0_f64 / sample_rate as f64;
-        let effective_speed_multiplier = if auto_disk_turbo_frames > 0 {
-            MAX_SPEED_MULTIPLIER.max(speed_multiplier)
+        let auto_disk_turbo_active = machine.mem.disk2.motor_on;
+        let effective_speed_multiplier = if auto_disk_turbo_active {
+            MAX_SPEED_MULTIPLIER
         } else {
             speed_multiplier
         };
-        let turbo_mode = effective_speed_multiplier > 1;
-        window.set_target_fps(if turbo_mode { 120 } else { 60 });
-        let target_cycles = BASE_FRAME_CYCLES * effective_speed_multiplier;
+        let turbo_mode = auto_disk_turbo_active || effective_speed_multiplier > 1;
+        window.set_target_fps(if auto_disk_turbo_active {
+            0
+        } else if turbo_mode {
+            120
+        } else {
+            60
+        });
+        update_window_title(&mut window, speed_multiplier, auto_disk_turbo_active);
+        let target_cycles = if auto_disk_turbo_active {
+            BASE_FRAME_CYCLES * MAX_SPEED_MULTIPLIER
+        } else {
+            BASE_FRAME_CYCLES * effective_speed_multiplier
+        };
 
         while frame_cycles < target_cycles {
             let cycles = machine.step();

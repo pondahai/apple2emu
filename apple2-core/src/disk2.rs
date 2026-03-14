@@ -20,7 +20,6 @@ pub struct Disk2 {
     pub data_latch: u8,
     pub write_ready: bool,
     pub write_bit_phase: u8,
-    pub io_access_count: u64,
 }
 
 impl Disk2 {
@@ -45,7 +44,6 @@ impl Disk2 {
             data_latch: 0,
             write_ready: false,
             write_bit_phase: 0,
-            io_access_count: 0,
         }
     }
 
@@ -111,7 +109,6 @@ impl Disk2 {
     }
 
     fn handle_io(&mut self, addr: u16) {
-        self.io_access_count = self.io_access_count.wrapping_add(1);
         let switch = (addr & 0x0F) as usize;
         match switch {
             0x00..=0x07 => {
@@ -237,6 +234,5 @@ impl Disk2 {
         self.write_bit_phase = 0;
         self.phases = [false; 4];
         self.current_qtr_track = 0;
-        self.io_access_count = 0;
     }
 }
