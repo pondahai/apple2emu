@@ -1,4 +1,4 @@
-# Apple II 模擬器開發與討論大綱
+﻿# Apple II 模擬器開發與討論大綱
 
 ## 1. 專案初始化與基礎除錯
 * **環境排除**：解決 Windows 系統下 Cargo 編譯指令找不到的問題，以及執行檔被系統佔用（Access Denied）時，透過 `taskkill` 自動強制關閉舊程序的開發流程。
@@ -108,5 +108,60 @@
 * **已知未解 Bug (待研究)**：
   * **音訊白雜訊失真**：雖然實作了 44.1kHz 的指令級佔空比積分 (Duty Cycle Integration)，但《德軍總部》等極端遊戲的槍聲雜訊依然呈現異常的「嗶嗶/嘟嘟」聲，推測可能還有更深層的 CPU 時序差異、未知的喇叭硬體非線性特性、或是過濾器 (DC Filter) 參數未最佳化所導致。此問題暫時擱置，待後續深度研究。
 
+## 19. 《The Goonies》磁碟相容性除錯紀錄 (2026-03-14)
+* **使用者症狀**：載入 `C:\Users\pondahai\Downloads\AppleWin1.26.1.1\ac\goonies.dsk.gz` 時，模擬器不是停在 `APPLE ][` 開機畫面，就是讀取後進入花螢幕/亂碼狀態。
+* **映像檔確認**：
+  * `.gz` 解壓後為標準 `143360` bytes，非損壞檔案。
+  * 問題不在 `.dsk.gz` 載入路徑；啟動/F3 解壓流程正常。
+* **穩定基線確認**：
+  * `save_smoke` 仍可正常進入 `]`、執行 `CATALOG -> NEW -> SAVE TEST -> CATALOG`。
+  * 表示一般 DOS 3.3 啟動與 Disk II 寫入路徑仍然正常，問題集中在高相容性 loader。
+* **新增診斷工具**：
+  * 建立 `apple2-desktop/src/bin/goonies_probe.rs`，以 headless 方式載入 `goonies.dsk.gz`，記錄 CPU/磁碟狀態、RAM 區段與卡點。
+  * probe 顯示 loader 會一路進入 RAM `$0486` 附近的遊戲載入段，之後長時間卡在 `$045F/$0460` 與 `$051F/$0520` 迴圈。
+  * 最終狀態固定在 `quarter-track = 92`、`track = 23` 附近反覆讀取，並非一開始就完全無法讀盤。
+* **RAM 內 loader 關鍵發現**：
+  * `$0380` 例程會不斷輪詢 `$C08C` 尋找 `D5 AA 96` prologue。
+  * 這說明卡點在後段自訂 loader 的 Disk II 讀取語意，而非 GUI 載入流程、gzip、或主開機流程。
+* **已嘗試且證偽的方向**：
+  * **ProDOS / DOS sector order 切換**：沒有改善，DOS-order 仍較接近正確。
+  * **單純將 `$C08C` 改為 non-destructive read**：
+    * `goonies` 反而退回只停在 `APPLE ][`。
+    * 一般 DOS 啟動與 `save_smoke` 也退化，故不能直接套用。
+  * **延長 ready window（同一 byte 保留多次 polling）**：
+    * 同樣會把一般 DOS boot 打壞，故已撤回。
+  * **第一版完整 bit-level read sequencer**：
+    * 測試可過，但 `save_smoke` 退回只停在 `APPLE ][`。
+    * 表示讀取狀態機方向正確，但實作過於粗暴，尚未與現有 DOS 路徑相容。
+* **已保留的有效改進**：
+  * `memory.rs` / `machine.rs` 改為 **bus-level timing plumbing**：
+    * 每次 bus access 先推進 Disk II `1` cycle。
+    * instruction 結尾再補剩餘 cycles。
+  * 此改動不破壞 `save_smoke`，但單獨不足以解開 `goonies` loader。
+* **目前結論**：
+  * 問題不是 `.gz`、不是 GUI 啟動路徑、不是簡單的 quarter-track 缺失，也不是單純 instruction-level timing 太粗。
+  * 真正缺的是 **更接近真機的 Disk II read sequencer / `$C08C` 輪詢語意**，而且必須在不破壞現有 DOS 3.3 路徑的前提下導入。
+* **下一步方向**：
+  * 保留目前穩定的 byte-level 基線作為 fallback。
+  * 另外建立較保守的 shadow read sequencer，專門改善 `$0380` 這種 prologue search/polling 行為。
+  * 每次修改都必須同時驗證：
+    * `cargo run --quiet --bin save_smoke`
+    * `cargo run --quiet --bin goonies_probe`
 
+## 20. 外部資料查核：`The Goonies` 與 Apple II 保護盤脈絡 (2026-03-14)
+* **已確認的外部事實**：
+  * `The Goonies` Apple II 版為 **Datasoft** 發行的 1985 年商業版本。
+  * 這至少說明它屬於 Apple II 商業保護盤常見年代與發行商範圍。
+* **與目前觀察吻合的外部脈絡**：
+  * Apple II 商業保護盤常會直接輪詢 Disk II 資料暫存器（如 `$C08C`），依賴 bit-stream、sync、bit-slip、weak bits 或非標準 sector/track 佈局。
+  * 這與 `goonies_probe` 看到 RAM `$0380` 反覆輪詢 `$C08C` 尋找 `D5 AA 96` prologue 的現象一致。
+* **模擬器實作上的旁證**：
+  * 多個 Apple II 模擬器/工具鏈都提過：若軟體使用非標準保護或 track-level 行為，單純 `.dsk` 表示法可能不足，往往需要更原始的 nibble/track 格式支援。
+  * AppleWin 歷年 release note 也可見持續修正 Disk II 相容性邊界案例，顯示這類問題在實務上很常見。
+* **目前仍未查到的部分**：
+  * 尚未找到公開資料明確指出 `The Goonies` Apple II 版採用哪一種 Datasoft copy protection。
+  * 尚未找到直接描述「`The Goonies` 在某模擬器卡在 track 23 / 花螢幕」的公開個案。
+* **本段結論（推論，不是已證實事實）**：
+  * `The Goonies` 很可能使用對 Disk II 後段讀取語意較敏感的商業 loader / 保護機制。
+  * 因此問題最合理地仍指向 Disk II read sequencer / `$C08C` polling 相容性缺口，而不是 `.gz` 載入、GUI 路徑或一般 DOS 啟動流程。
 

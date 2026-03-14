@@ -1,4 +1,6 @@
 extern crate alloc;
+
+use alloc::vec::Vec;
 use crate::disk2::Disk2;
 
 /// The 6502 CPU has a 16-bit address bus (64KB addressable space)
@@ -32,6 +34,10 @@ pub struct Apple2Memory {
 
     // Speaker State
     pub speaker: bool,
+    pub speaker_toggle_cycles: Vec<u64>,
+    pub cpu_step_cycle_base: u64,
+    pub cpu_step_cycle_cursor: u32,
+    pub cpu_step_audio_active: bool,
 
     // Language Card (16K RAM at $D000-$FFFF)
     pub lc_ram: [u8; 16384],
@@ -53,6 +59,10 @@ impl Apple2Memory {
             keyboard_latch: 0,
             disk2: alloc::boxed::Box::new(Disk2::new()),
             speaker: false,
+            speaker_toggle_cycles: Vec::new(),
+            cpu_step_cycle_base: 0,
+            cpu_step_cycle_cursor: 0,
+            cpu_step_audio_active: false,
             lc_ram: [0; 16384],
             lc_read_enable: false,
             lc_write_enable: false,
@@ -74,6 +84,10 @@ impl Apple2Memory {
         self.hires_mode = false;
         self.keyboard_latch = 0;
         self.speaker = false;
+        self.speaker_toggle_cycles.clear();
+        self.cpu_step_cycle_base = 0;
+        self.cpu_step_cycle_cursor = 0;
+        self.cpu_step_audio_active = false;
         self.disk2.reset();
         
         self.lc_read_enable = false;
@@ -84,11 +98,53 @@ impl Apple2Memory {
         // Ensure Apple II ROM performs a cold boot by clearing the signature
         self.ram[0x03F4] = 0;
     }
+
+    pub fn begin_cpu_step(&mut self, cycle_base: u64) {
+        self.cpu_step_cycle_base = cycle_base;
+        self.cpu_step_cycle_cursor = 0;
+        self.cpu_step_audio_active = true;
+    }
+
+    pub fn end_cpu_step(&mut self) {
+        self.cpu_step_audio_active = false;
+    }
+
+    pub fn finalize_cpu_step_cycles(&mut self, total_cycles: u32) {
+        let accounted = self.cpu_step_cycle_cursor.min(total_cycles);
+        let remaining = total_cycles - accounted;
+        if remaining > 0 {
+            self.disk2.tick(remaining);
+            self.cpu_step_cycle_cursor = total_cycles;
+        }
+    }
+
+    pub fn take_speaker_toggle_cycles(&mut self) -> Vec<u64> {
+        core::mem::take(&mut self.speaker_toggle_cycles)
+    }
+
+    fn record_bus_access_cycle(&mut self) -> Option<u64> {
+        if !self.cpu_step_audio_active {
+            return None;
+        }
+
+        let cycle = self.cpu_step_cycle_base + self.cpu_step_cycle_cursor as u64;
+        self.cpu_step_cycle_cursor = self.cpu_step_cycle_cursor.saturating_add(1);
+        self.disk2.tick(1);
+        Some(cycle)
+    }
+
+    fn toggle_speaker(&mut self, cycle: Option<u64>) {
+        self.speaker = !self.speaker;
+        if let Some(c) = cycle {
+            self.speaker_toggle_cycles.push(c);
+        }
+    }
 }
 
 // Memory map implementation specific for Apple II
 impl Memory for Apple2Memory {
     fn read(&mut self, addr: u16) -> u8 {
+        let access_cycle = self.record_bus_access_cycle();
         let mut clear_pre_write = true;
         let val = match addr {
             // Main RAM (48K)
@@ -144,7 +200,7 @@ impl Memory for Apple2Memory {
                     
                     // Speaker toggle ($C030)
                     0xC030 => {
-                        self.speaker = !self.speaker;
+                        self.toggle_speaker(access_cycle);
                         0
                     }
 
@@ -191,6 +247,7 @@ impl Memory for Apple2Memory {
     }
 
     fn write(&mut self, addr: u16, data: u8) {
+        let access_cycle = self.record_bus_access_cycle();
         self.lc_pre_write_switch = 0;
         
         match addr {
@@ -231,7 +288,7 @@ impl Memory for Apple2Memory {
                     
                     // Speaker toggle ($C030)
                     0xC030 => {
-                        self.speaker = !self.speaker;
+                        self.toggle_speaker(access_cycle);
                     }
 
                     _ => {}
