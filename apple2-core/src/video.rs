@@ -8,10 +8,30 @@ pub const SCREEN_HEIGHT: usize = 192; // 24 rows * 8 pixels per char
 /// This maps visual row (0-23) to memory row offset (0x0400 to 0x07F8)
 #[allow(dead_code)]
 const ROW_ADDRESSES: [u16; 24] = [
-    0x0400, 0x0480, 0x0500, 0x0580, 0x0428, 0x04A8, 0x0528, 0x05A8,
-    0x0450, 0x04D0, 0x0550, 0x05D0, 0x0400 + 0x28, 0x0480 + 0x28, 0x0500 + 0x28, 0x0580 + 0x28,
-    0x0428 + 0x28, 0x04A8 + 0x28, 0x0528 + 0x28, 0x05A8 + 0x28,
-    0x0450 + 0x28, 0x04D0 + 0x28, 0x0550 + 0x28, 0x05D0 + 0x28, // Wait, this logic for the last 1/3 is slightly off, let's use the explicit calculated list:
+    0x0400,
+    0x0480,
+    0x0500,
+    0x0580,
+    0x0428,
+    0x04A8,
+    0x0528,
+    0x05A8,
+    0x0450,
+    0x04D0,
+    0x0550,
+    0x05D0,
+    0x0400 + 0x28,
+    0x0480 + 0x28,
+    0x0500 + 0x28,
+    0x0580 + 0x28,
+    0x0428 + 0x28,
+    0x04A8 + 0x28,
+    0x0528 + 0x28,
+    0x05A8 + 0x28,
+    0x0450 + 0x28,
+    0x04D0 + 0x28,
+    0x0550 + 0x28,
+    0x05D0 + 0x28, // Wait, this logic for the last 1/3 is slightly off, let's use the explicit calculated list:
 ];
 
 pub struct Video {
@@ -43,22 +63,27 @@ impl Video {
         let green_color = 0x00_00_FF_00; // ARGB Green
         let black_color = 0x00_00_00_00; // ARGB Black
 
-        let is_blink_on = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() % 533) > 266;
+        let is_blink_on = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            % 533)
+            > 266;
 
         for row in 0..24 {
             let row_addr = Self::get_text_row_addr(row);
-            
+
             for col in 0..40 {
                 // Read the character code from Video RAM
                 let char_code = mem.ram[(row_addr + col as u16) as usize];
-                
+
                 // Text Modes:
                 // $00-$3F: Inverse (uppercase only)
                 // $40-$7F: Flashing (uppercase only)
                 // $80-$FF: Normal (upper and lowercase, etc.)
                 let is_inverse = char_code < 0x40;
                 let is_flashing = char_code >= 0x40 && char_code < 0x80;
-                
+
                 let invert_colors = is_inverse || (is_flashing && is_blink_on);
 
                 // The Apple II character generator ROM is 2KB.
@@ -68,27 +93,27 @@ impl Video {
                     0x40..=0x7F => char_code as usize,        // Map to uppercase
                     _ => char_code as usize,                  // Use as is
                 };
-                
+
                 // Render each row of the character (8 pixels high)
                 for char_y in 0..8 {
                     let font_byte = char_rom[char_index * 8 + char_y];
 
                     let screen_y = row * 8 + char_y;
-                    
+
                     // Each character is nominally 7 pixels wide on screen
                     for char_x in 0..7 {
                         let screen_x = col * 7 + char_x;
-                        
+
                         // Apple II characters form their pixels from MSB to LSB usually,
                         // so bit 6 is the leftmost pixel, bit 0 is the rightmost part.
                         let mut pixel_on = (font_byte & (1 << (6 - char_x))) != 0;
-                        
+
                         if invert_colors {
                             pixel_on = !pixel_on;
                         }
 
                         let color = if pixel_on { green_color } else { black_color };
-                        
+
                         self.frame_buffer[screen_y * SCREEN_WIDTH + screen_x] = color;
                     }
                 }
@@ -115,20 +140,25 @@ impl Video {
             0xD => 0xFF_D6_D6_00, // Yellow
             0xE => 0xFF_65_FF_A2, // Aquamarine
             0xF => 0xFF_FF_FF_FF, // White
-             _  => 0xFF_00_00_00,
+            _ => 0xFF_00_00_00,
         }
     }
 
     /// Render the Apple II Low-Res Graphics Mode frame into the 32-bit framebuffer.
     /// In mixed mode, the bottom 4 lines of text (rows 20-23) are rendered as text.
     pub fn render_lores_frame(&mut self, mem: &Apple2Memory, char_rom: &[u8; 2048]) {
-        let is_blink_on = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() % 533) > 266;
+        let is_blink_on = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            % 533)
+            > 266;
         let green_color = 0x00_00_FF_00; // ARGB Green
         let black_color = 0x00_00_00_00; // ARGB Black
 
         for row in 0..24 {
             let row_addr = Self::get_text_row_addr(row);
-            
+
             // Handle Mixed Mode (bottom 4 rows are text)
             if mem.mixed_mode && row >= 20 {
                 // Render as text
@@ -143,15 +173,17 @@ impl Video {
                         0x40..=0x7F => char_code as usize,
                         _ => char_code as usize,
                     };
-                    
+
                     for char_y in 0..8 {
                         let font_byte = char_rom[char_index * 8 + char_y];
                         let screen_y = row * 8 + char_y;
-                        
+
                         for char_x in 0..7 {
                             let screen_x = col * 7 + char_x;
                             let mut pixel_on = (font_byte & (1 << (6 - char_x))) != 0;
-                            if invert_colors { pixel_on = !pixel_on; }
+                            if invert_colors {
+                                pixel_on = !pixel_on;
+                            }
                             let color = if pixel_on { green_color } else { black_color };
                             self.frame_buffer[screen_y * SCREEN_WIDTH + screen_x] = color;
                         }
@@ -164,7 +196,7 @@ impl Video {
             for col in 0..40 {
                 // Read the Lo-Res color byte
                 let color_byte = mem.ram[(row_addr + col as u16) as usize];
-                
+
                 // Top block is the lower 4 bits (pixels 0-3 of the character cell)
                 let top_color = Self::get_lores_color(color_byte & 0x0F);
                 // Bottom block is the upper 4 bits (pixels 4-7 of the character cell)
@@ -192,20 +224,25 @@ impl Video {
         // Page 1: 0x2000 - 0x3FFF
         // Page 2: 0x4000 - 0x5FFF
         let base = if page2 { 0x4000 } else { 0x2000 };
-        
+
         let block = row / 64; // 0, 1, 2
         let sub_block = (row % 64) / 8; // 0..7
         let offset = row % 8; // 0..7
-        
+
         base + (offset * 1024) as u16 + (sub_block * 128) as u16 + (block * 40) as u16
     }
 
     /// Render the Apple II High-Res Graphics Mode frame into the 32-bit framebuffer.
     pub fn render_hires_frame(&mut self, mem: &Apple2Memory, char_rom: &[u8; 2048]) {
-        let is_blink_on = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() % 533) > 266;
+        let is_blink_on = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            % 533)
+            > 266;
         let green_color = 0x00_00_FF_00; // ARGB Green
         let black_color = 0x00_00_00_00; // ARGB Black
-        
+
         // Hi-Res Colors (approximate ARGB)
         let white_color = 0xFF_FF_FF_FF;
         let black_color_hr = 0xFF_00_00_00;
@@ -220,7 +257,7 @@ impl Video {
                 let text_row = row / 8;
                 let char_y = row % 8;
                 let row_addr = Self::get_text_row_addr(text_row);
-                
+
                 for col in 0..40 {
                     let char_code = mem.ram[(row_addr + col as u16) as usize];
                     let is_inverse = char_code < 0x40;
@@ -232,14 +269,16 @@ impl Video {
                         0x40..=0x7F => char_code as usize,
                         _ => char_code as usize,
                     };
-                    
+
                     let font_byte = char_rom[char_index * 8 + char_y];
                     let screen_y = row;
-                    
+
                     for char_x in 0..7 {
                         let screen_x = col * 7 + char_x;
                         let mut pixel_on = (font_byte & (1 << (6 - char_x))) != 0;
-                        if invert_colors { pixel_on = !pixel_on; }
+                        if invert_colors {
+                            pixel_on = !pixel_on;
+                        }
                         let color = if pixel_on { green_color } else { black_color };
                         self.frame_buffer[screen_y * SCREEN_WIDTH + screen_x] = color;
                     }
@@ -253,10 +292,10 @@ impl Video {
 
             for col in 0..40 {
                 let byte = mem.ram[(row_addr + col as u16) as usize];
-                
+
                 // Bit 7 is the palette shift/artifact bit
                 let shift_bit = (byte & 0x80) != 0;
-                
+
                 // Bits 0-6 are the 7 pixels (LSB to MSB)
                 for bit_idx in 0..7 {
                     let current_bit = (byte & (1 << bit_idx)) != 0;
@@ -270,7 +309,7 @@ impl Video {
 
                     let screen_x = col * 7 + bit_idx;
                     let screen_y = row;
-                    
+
                     // NTSC Artifact color approximation rules:
                     // If current bit is OFF:
                     //   If bordered by ON bits -> depends on odd/even column, but usually just black unless bleeding.

@@ -1,7 +1,7 @@
 extern crate alloc;
 
-use alloc::vec::Vec;
 use crate::disk2::Disk2;
+use alloc::vec::Vec;
 
 /// The 6502 CPU has a 16-bit address bus (64KB addressable space)
 /// and an 8-bit data bus.
@@ -19,7 +19,7 @@ pub trait Memory {
 pub struct Apple2Memory {
     pub ram: [u8; 49152], // 48KB (0x0000 - 0xBFFF)
     pub rom: [u8; 12288], // 12KB (0xD000 - 0xFFFF)
-    
+
     // Video Soft Switches
     pub text_mode: bool,
     pub mixed_mode: bool,
@@ -89,7 +89,7 @@ impl Apple2Memory {
         self.cpu_step_cycle_cursor = 0;
         self.cpu_step_audio_active = false;
         self.disk2.reset();
-        
+
         self.lc_read_enable = false;
         self.lc_write_enable = false;
         self.lc_bank2 = true;
@@ -154,9 +154,7 @@ impl Memory for Apple2Memory {
             0xC000..=0xCFFF => {
                 match addr {
                     // Keyboard Data (mirrored $C000-$C00F)
-                    0xC000..=0xC00F => {
-                        self.keyboard_latch
-                    }
+                    0xC000..=0xC00F => self.keyboard_latch,
                     // Keyboard Clear Strobe (mirrored $C010-$C01F)
                     0xC010..=0xC01F => {
                         let val = self.keyboard_latch;
@@ -181,23 +179,45 @@ impl Memory for Apple2Memory {
                         } else {
                             self.lc_write_enable = false;
                         }
-                        
+
                         0 // Normally this floats, return 0
                     }
                     // Disk II Controller (Slot 6)
-                    0xC0E0..=0xC0EF => {
-                        self.disk2.read_io(addr)
-                    }
+                    0xC0E0..=0xC0EF => self.disk2.read_io(addr),
                     // Video Soft Switches ($C050 - $C057)
-                    0xC050 => { self.text_mode = false; 0 } // Graphics Mode
-                    0xC051 => { self.text_mode = true; 0 }  // Text Mode
-                    0xC052 => { self.mixed_mode = false; 0 } // Full Screen
-                    0xC053 => { self.mixed_mode = true; 0 }  // Mixed Mode
-                    0xC054 => { self.page2 = false; 0 }      // Page 1
-                    0xC055 => { self.page2 = true; 0 }       // Page 2
-                    0xC056 => { self.hires_mode = false; 0 } // Lo-Res
-                    0xC057 => { self.hires_mode = true; 0 }  // Hi-Res
-                    
+                    0xC050 => {
+                        self.text_mode = false;
+                        0
+                    } // Graphics Mode
+                    0xC051 => {
+                        self.text_mode = true;
+                        0
+                    } // Text Mode
+                    0xC052 => {
+                        self.mixed_mode = false;
+                        0
+                    } // Full Screen
+                    0xC053 => {
+                        self.mixed_mode = true;
+                        0
+                    } // Mixed Mode
+                    0xC054 => {
+                        self.page2 = false;
+                        0
+                    } // Page 1
+                    0xC055 => {
+                        self.page2 = true;
+                        0
+                    } // Page 2
+                    0xC056 => {
+                        self.hires_mode = false;
+                        0
+                    } // Lo-Res
+                    0xC057 => {
+                        self.hires_mode = true;
+                        0
+                    } // Hi-Res
+
                     // Speaker toggle ($C030)
                     0xC030 => {
                         self.toggle_speaker(access_cycle);
@@ -205,10 +225,8 @@ impl Memory for Apple2Memory {
                     }
 
                     // Slot 6 ROM
-                    0xC600..=0xC6FF => {
-                        self.disk2.rom[(addr - 0xC600) as usize]
-                    }
-                    
+                    0xC600..=0xC6FF => self.disk2.rom[(addr - 0xC600) as usize],
+
                     // Pushbuttons / Joystick / Paddles
                     // $C061 (Pushbutton 0), $C062 (Pushbutton 1) -> 0x00 (Not pressed)
                     // $C064-$C067 (Analog Paddles) -> For simplicity, return 0x00 (Timeout immediately)
@@ -249,7 +267,7 @@ impl Memory for Apple2Memory {
     fn write(&mut self, addr: u16, data: u8) {
         let access_cycle = self.record_bus_access_cycle();
         self.lc_pre_write_switch = 0;
-        
+
         match addr {
             // Main RAM (48K)
             0x0000..=0xBFFF => {
@@ -277,15 +295,31 @@ impl Memory for Apple2Memory {
                         self.disk2.write_io(addr, data);
                     }
                     // Video Soft Switches ($C050 - $C057)
-                    0xC050 => { self.text_mode = false; } // Graphics Mode
-                    0xC051 => { self.text_mode = true; }  // Text Mode
-                    0xC052 => { self.mixed_mode = false; } // Full Screen
-                    0xC053 => { self.mixed_mode = true; }  // Mixed Mode
-                    0xC054 => { self.page2 = false; }      // Page 1
-                    0xC055 => { self.page2 = true; }       // Page 2
-                    0xC056 => { self.hires_mode = false; } // Lo-Res
-                    0xC057 => { self.hires_mode = true; }  // Hi-Res
-                    
+                    0xC050 => {
+                        self.text_mode = false;
+                    } // Graphics Mode
+                    0xC051 => {
+                        self.text_mode = true;
+                    } // Text Mode
+                    0xC052 => {
+                        self.mixed_mode = false;
+                    } // Full Screen
+                    0xC053 => {
+                        self.mixed_mode = true;
+                    } // Mixed Mode
+                    0xC054 => {
+                        self.page2 = false;
+                    } // Page 1
+                    0xC055 => {
+                        self.page2 = true;
+                    } // Page 2
+                    0xC056 => {
+                        self.hires_mode = false;
+                    } // Lo-Res
+                    0xC057 => {
+                        self.hires_mode = true;
+                    } // Hi-Res
+
                     // Speaker toggle ($C030)
                     0xC030 => {
                         self.toggle_speaker(access_cycle);

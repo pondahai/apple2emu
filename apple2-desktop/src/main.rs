@@ -1,16 +1,82 @@
-use std::time::Instant;
-use std::io::Read;
-use minifb::{Key, Window, WindowOptions};
 use apple2_core::machine::Apple2Machine;
-use apple2_core::video::{Video, SCREEN_WIDTH, SCREEN_HEIGHT};
 use apple2_core::memory::Memory;
-use rodio::{OutputStream, Sink};
+use apple2_core::video::{SCREEN_HEIGHT, SCREEN_WIDTH, Video};
 use flate2::read::GzDecoder;
+use minifb::{Key, Window, WindowOptions};
+use rodio::{OutputStream, Sink};
+use std::io::Read;
+use std::time::Instant;
 
 mod config;
 use config::EmulatorConfig;
 
+struct AudioMixerState {
+    next_sample_cycle: f64,
+    last_mix_cycle: f64,
+    speaker_high_cycles: f64,
+    speaker_on: bool,
+}
+
+impl AudioMixerState {
+    fn new(initial_speaker_on: bool) -> Self {
+        Self {
+            next_sample_cycle: 0.0,
+            last_mix_cycle: 0.0,
+            speaker_high_cycles: 0.0,
+            speaker_on: initial_speaker_on,
+        }
+    }
+
+    fn reset(&mut self, speaker_on: bool) {
+        self.next_sample_cycle = 0.0;
+        self.last_mix_cycle = 0.0;
+        self.speaker_high_cycles = 0.0;
+        self.speaker_on = speaker_on;
+    }
+
+    fn mix_until(
+        &mut self,
+        target_cycle: f64,
+        cycles_per_sample: f64,
+        dc_filter_x1: &mut f32,
+        dc_filter_y1: &mut f32,
+        audio_samples: &mut Vec<f32>,
+    ) {
+        let first_sample_cycle = cycles_per_sample;
+        while self.last_mix_cycle < target_cycle {
+            let next_boundary = if self.next_sample_cycle > 0.0 {
+                self.next_sample_cycle
+            } else {
+                first_sample_cycle
+            };
+            let segment_end = target_cycle.min(next_boundary);
+            let span = segment_end - self.last_mix_cycle;
+
+            if self.speaker_on {
+                self.speaker_high_cycles += span;
+            }
+
+            self.last_mix_cycle = segment_end;
+
+            if self.last_mix_cycle + f64::EPSILON >= next_boundary {
+                let ratio = (self.speaker_high_cycles / cycles_per_sample).clamp(0.0, 1.0) as f32;
+                let raw_sample_val = (ratio * 0.3) - 0.15;
+                let filtered_val = raw_sample_val - *dc_filter_x1 + 0.995 * *dc_filter_y1;
+                *dc_filter_x1 = raw_sample_val;
+                *dc_filter_y1 = filtered_val;
+                audio_samples.push(filtered_val);
+
+                self.speaker_high_cycles = 0.0;
+                self.next_sample_cycle = next_boundary + cycles_per_sample;
+            }
+        }
+    }
+}
+
 fn decode_disk_image(path: &std::path::Path, raw_data: Vec<u8>) -> Result<Vec<u8>, String> {
+    const EXPECTED_DSK_BYTES: usize = 143_360;
+    const MAX_TRAILING_BYTES: usize = 4_096;
+
     let is_gz_ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -29,19 +95,40 @@ fn decode_disk_image(path: &std::path::Path, raw_data: Vec<u8>) -> Result<Vec<u8
         raw_data
     };
 
-    if disk.len() != 143360 {
+    if disk.len() < EXPECTED_DSK_BYTES {
         return Err(format!(
-            "Disk size mismatch for {}: {} (expected 143360 bytes)",
+            "Disk size mismatch for {}: {} (expected at least 143360 bytes)",
             path.display(),
             disk.len()
         ));
     }
-    Ok(disk)
+
+    if disk.len() > EXPECTED_DSK_BYTES {
+        let trailing = disk.len() - EXPECTED_DSK_BYTES;
+        if trailing > MAX_TRAILING_BYTES {
+            return Err(format!(
+                "Disk size mismatch for {}: {} (expected 143360 bytes, trailing {} too large to auto-trim)",
+                path.display(),
+                disk.len(),
+                trailing
+            ));
+        }
+
+        println!(
+            "WARNING: Trimming {} trailing bytes from {}",
+            trailing,
+            path.display()
+        );
+    }
+
+    Ok(disk[..EXPECTED_DSK_BYTES].to_vec())
 }
 
 fn main() {
     const BASE_FRAME_CYCLES: u32 = 17_050;
     const MAX_SPEED_MULTIPLIER: u32 = 5;
+    const AUTO_DISK_TURBO_HOLD_FRAMES: u32 = 12;
+    const AUTO_DISK_TURBO_IO_THRESHOLD: u64 = 96;
 
     println!("Starting Apple II Emulator targeting Windows (minifb) and core no_std...");
 
@@ -50,10 +137,11 @@ fn main() {
     // Create the Windows window
     let mut window = Window::new(
         "Apple II Emulator (Rust no_std core)",
-        SCREEN_WIDTH * 2,  // Scale up 2x for visibility
+        SCREEN_WIDTH * 2, // Scale up 2x for visibility
         SCREEN_HEIGHT * 2,
         WindowOptions::default(),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Limit to ~60 FPS
     window.set_target_fps(60);
@@ -80,16 +168,23 @@ fn main() {
         p.pop(); // debug/release
         p.pop(); // target
         let d = p.join("roms");
-        if d.exists() { d } else {
+        if d.exists() {
+            d
+        } else {
             let d = std::path::PathBuf::from("roms");
-            if d.exists() { d } else {
+            if d.exists() {
+                d
+            } else {
                 std::path::PathBuf::from("../roms")
             }
         }
     } else {
         std::path::PathBuf::from("roms")
     };
-    println!(">>> ROMs directory resolved to: {:?}", std::fs::canonicalize(&roms_dir).unwrap_or(roms_dir.clone()));
+    println!(
+        ">>> ROMs directory resolved to: {:?}",
+        std::fs::canonicalize(&roms_dir).unwrap_or(roms_dir.clone())
+    );
 
     let mut cached_main_rom = Vec::new();
     let mut cached_disk_rom = Vec::new();
@@ -108,7 +203,7 @@ fn main() {
         }
         Err(e) => println!("ERROR: Could not open {}: {}", main_rom_path.display(), e),
     }
-    
+
     // Load Disk II Boot ROM
     let disk_rom_path = roms_dir.join("DISK2.ROM");
     match std::fs::read(&disk_rom_path) {
@@ -131,16 +226,14 @@ fn main() {
     }
 
     match std::fs::read(&dsk_path) {
-        Ok(raw_data) => {
-            match decode_disk_image(&dsk_path, raw_data) {
-                Ok(disk_image) => {
-                    cached_disk_image = Some(disk_image.clone());
-                    machine.mem.disk2.load_disk(&disk_image);
-                    println!("Loaded floppy image from {}: 140KB", dsk_path.display());
-                }
-                Err(e) => println!("WARNING: {}", e),
+        Ok(raw_data) => match decode_disk_image(&dsk_path, raw_data) {
+            Ok(disk_image) => {
+                cached_disk_image = Some(disk_image.clone());
+                machine.mem.disk2.load_disk(&disk_image);
+                println!("Loaded floppy image from {}: 140KB", dsk_path.display());
             }
-        }
+            Err(e) => println!("WARNING: {}", e),
+        },
         Err(e) => println!("ERROR: Could not open {}: {}", dsk_path.display(), e),
     }
 
@@ -160,21 +253,25 @@ fn main() {
     let mut last_cycle = Instant::now();
     let mut key_queue: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
     let mut last_keys: Vec<Key> = Vec::new();
-    
+
     let mut last_f2_down = false;
     let mut last_f3_down = false;
     let mut last_f4_down = false;
     let mut speed_multiplier: u32 = 1;
-    let mut unprocessed_cycles: f32 = 0.0;
+    let mut last_disk_io_access_count = machine.mem.disk2.io_access_count;
+    let mut auto_disk_turbo_frames = 0u32;
     let mut dc_filter_x1: f32 = 0.0;
     let mut dc_filter_y1: f32 = 0.0;
+    let mut audio_mixer = AudioMixerState::new(machine.mem.speaker);
 
     while window.is_open() && !window.is_key_down(Key::F10) {
         // Handle Input
         let current_keys = window.get_keys();
         let mut keys = Vec::new();
         for &k in &current_keys {
-            if !last_keys.contains(&k) { keys.push(k); }
+            if !last_keys.contains(&k) {
+                keys.push(k);
+            }
         }
         last_keys = current_keys;
         let ctrl_down = window.is_key_down(Key::LeftCtrl) || window.is_key_down(Key::RightCtrl);
@@ -182,60 +279,321 @@ fn main() {
 
         for &key in keys.iter() {
             let ascii = match key {
-                Key::A => if ctrl_down { 0x01 } else { b'A' },
-                Key::B => if ctrl_down { 0x02 } else { b'B' },
-                Key::C => if ctrl_down { 0x03 } else { b'C' },
-                Key::D => if ctrl_down { 0x04 } else { b'D' },
-                Key::E => if ctrl_down { 0x05 } else { b'E' },
-                Key::F => if ctrl_down { 0x06 } else { b'F' },
-                Key::G => if ctrl_down { 0x07 } else { b'G' },
-                Key::H => if ctrl_down { 0x08 } else { b'H' },
-                Key::I => if ctrl_down { 0x09 } else { b'I' },
-                Key::J => if ctrl_down { 0x0A } else { b'J' },
-                Key::K => if ctrl_down { 0x0B } else { b'K' },
-                Key::L => if ctrl_down { 0x0C } else { b'L' },
-                Key::M => if ctrl_down { 0x0D } else { b'M' },
-                Key::N => if ctrl_down { 0x0E } else { b'N' },
-                Key::O => if ctrl_down { 0x0F } else { b'O' },
-                Key::P => if ctrl_down { 0x10 } else { b'P' },
-                Key::Q => if ctrl_down { 0x11 } else { b'Q' },
-                Key::R => if ctrl_down { 0x12 } else { b'R' },
-                Key::S => if ctrl_down { 0x13 } else { b'S' },
-                Key::T => if ctrl_down { 0x14 } else { b'T' },
-                Key::U => if ctrl_down { 0x15 } else { b'U' },
-                Key::V => if ctrl_down { 0x16 } else { b'V' },
-                Key::W => if ctrl_down { 0x17 } else { b'W' },
-                Key::X => if ctrl_down { 0x18 } else { b'X' },
-                Key::Y => if ctrl_down { 0x19 } else { b'Y' },
-                Key::Z => if ctrl_down { 0x1A } else { b'Z' },
+                Key::A => {
+                    if ctrl_down {
+                        0x01
+                    } else {
+                        b'A'
+                    }
+                }
+                Key::B => {
+                    if ctrl_down {
+                        0x02
+                    } else {
+                        b'B'
+                    }
+                }
+                Key::C => {
+                    if ctrl_down {
+                        0x03
+                    } else {
+                        b'C'
+                    }
+                }
+                Key::D => {
+                    if ctrl_down {
+                        0x04
+                    } else {
+                        b'D'
+                    }
+                }
+                Key::E => {
+                    if ctrl_down {
+                        0x05
+                    } else {
+                        b'E'
+                    }
+                }
+                Key::F => {
+                    if ctrl_down {
+                        0x06
+                    } else {
+                        b'F'
+                    }
+                }
+                Key::G => {
+                    if ctrl_down {
+                        0x07
+                    } else {
+                        b'G'
+                    }
+                }
+                Key::H => {
+                    if ctrl_down {
+                        0x08
+                    } else {
+                        b'H'
+                    }
+                }
+                Key::I => {
+                    if ctrl_down {
+                        0x09
+                    } else {
+                        b'I'
+                    }
+                }
+                Key::J => {
+                    if ctrl_down {
+                        0x0A
+                    } else {
+                        b'J'
+                    }
+                }
+                Key::K => {
+                    if ctrl_down {
+                        0x0B
+                    } else {
+                        b'K'
+                    }
+                }
+                Key::L => {
+                    if ctrl_down {
+                        0x0C
+                    } else {
+                        b'L'
+                    }
+                }
+                Key::M => {
+                    if ctrl_down {
+                        0x0D
+                    } else {
+                        b'M'
+                    }
+                }
+                Key::N => {
+                    if ctrl_down {
+                        0x0E
+                    } else {
+                        b'N'
+                    }
+                }
+                Key::O => {
+                    if ctrl_down {
+                        0x0F
+                    } else {
+                        b'O'
+                    }
+                }
+                Key::P => {
+                    if ctrl_down {
+                        0x10
+                    } else {
+                        b'P'
+                    }
+                }
+                Key::Q => {
+                    if ctrl_down {
+                        0x11
+                    } else {
+                        b'Q'
+                    }
+                }
+                Key::R => {
+                    if ctrl_down {
+                        0x12
+                    } else {
+                        b'R'
+                    }
+                }
+                Key::S => {
+                    if ctrl_down {
+                        0x13
+                    } else {
+                        b'S'
+                    }
+                }
+                Key::T => {
+                    if ctrl_down {
+                        0x14
+                    } else {
+                        b'T'
+                    }
+                }
+                Key::U => {
+                    if ctrl_down {
+                        0x15
+                    } else {
+                        b'U'
+                    }
+                }
+                Key::V => {
+                    if ctrl_down {
+                        0x16
+                    } else {
+                        b'V'
+                    }
+                }
+                Key::W => {
+                    if ctrl_down {
+                        0x17
+                    } else {
+                        b'W'
+                    }
+                }
+                Key::X => {
+                    if ctrl_down {
+                        0x18
+                    } else {
+                        b'X'
+                    }
+                }
+                Key::Y => {
+                    if ctrl_down {
+                        0x19
+                    } else {
+                        b'Y'
+                    }
+                }
+                Key::Z => {
+                    if ctrl_down {
+                        0x1A
+                    } else {
+                        b'Z'
+                    }
+                }
 
                 // Numbers and Symbols
-                Key::Key0 => if shift_down { b')' } else { b'0' },
-                Key::Key1 => if shift_down { b'!' } else { b'1' },
-                Key::Key2 => if shift_down { b'@' } else { b'2' },
-                Key::Key3 => if shift_down { b'#' } else { b'3' },
-                Key::Key4 => if shift_down { b'$' } else { b'4' },
-                Key::Key5 => if shift_down { b'%' } else { b'5' },
-                Key::Key6 => if shift_down { b'^' } else { b'6' },
-                Key::Key7 => if shift_down { b'&' } else { b'7' },
-                Key::Key8 => if shift_down { b'*' } else { b'8' },
-                Key::Key9 => if shift_down { b'(' } else { b'9' },
+                Key::Key0 => {
+                    if shift_down {
+                        b')'
+                    } else {
+                        b'0'
+                    }
+                }
+                Key::Key1 => {
+                    if shift_down {
+                        b'!'
+                    } else {
+                        b'1'
+                    }
+                }
+                Key::Key2 => {
+                    if shift_down {
+                        b'@'
+                    } else {
+                        b'2'
+                    }
+                }
+                Key::Key3 => {
+                    if shift_down {
+                        b'#'
+                    } else {
+                        b'3'
+                    }
+                }
+                Key::Key4 => {
+                    if shift_down {
+                        b'$'
+                    } else {
+                        b'4'
+                    }
+                }
+                Key::Key5 => {
+                    if shift_down {
+                        b'%'
+                    } else {
+                        b'5'
+                    }
+                }
+                Key::Key6 => {
+                    if shift_down {
+                        b'^'
+                    } else {
+                        b'6'
+                    }
+                }
+                Key::Key7 => {
+                    if shift_down {
+                        b'&'
+                    } else {
+                        b'7'
+                    }
+                }
+                Key::Key8 => {
+                    if shift_down {
+                        b'*'
+                    } else {
+                        b'8'
+                    }
+                }
+                Key::Key9 => {
+                    if shift_down {
+                        b'('
+                    } else {
+                        b'9'
+                    }
+                }
 
-                Key::Minus => if shift_down { b'_' } else { b'-' },
-                Key::Equal => if shift_down { b'+' } else { b'=' },
-                Key::Comma => if shift_down { b'<' } else { b',' },
-                Key::Period => if shift_down { b'>' } else { b'.' },
-                Key::Slash => if shift_down { b'?' } else { b'/' },
-                Key::Semicolon => if shift_down { b':' } else { b';' },
-                Key::Apostrophe => if shift_down { b'"' } else { b'\'' },
+                Key::Minus => {
+                    if shift_down {
+                        b'_'
+                    } else {
+                        b'-'
+                    }
+                }
+                Key::Equal => {
+                    if shift_down {
+                        b'+'
+                    } else {
+                        b'='
+                    }
+                }
+                Key::Comma => {
+                    if shift_down {
+                        b'<'
+                    } else {
+                        b','
+                    }
+                }
+                Key::Period => {
+                    if shift_down {
+                        b'>'
+                    } else {
+                        b'.'
+                    }
+                }
+                Key::Slash => {
+                    if shift_down {
+                        b'?'
+                    } else {
+                        b'/'
+                    }
+                }
+                Key::Semicolon => {
+                    if shift_down {
+                        b':'
+                    } else {
+                        b';'
+                    }
+                }
+                Key::Apostrophe => {
+                    if shift_down {
+                        b'"'
+                    } else {
+                        b'\''
+                    }
+                }
 
                 // Control Keys
-                Key::Space => b' ', Key::Enter => 0x0D, Key::Backspace => 0x08, Key::Escape => 0x1B,
+                Key::Space => b' ',
+                Key::Enter => 0x0D,
+                Key::Backspace => 0x08,
+                Key::Escape => 0x1B,
                 _ => 0,
             };
-            if ascii != 0 { 
+            if ascii != 0 {
                 println!("Key Pressed: {:?} -> ASCII {:02X}", key, ascii);
-                key_queue.push_back(ascii); 
+                key_queue.push_back(ascii);
             }
         }
 
@@ -257,6 +615,11 @@ fn main() {
                 }
                 machine.reset();
             }
+            audio_mixer.reset(machine.mem.speaker);
+            dc_filter_x1 = 0.0;
+            dc_filter_y1 = 0.0;
+            last_disk_io_access_count = machine.mem.disk2.io_access_count;
+            auto_disk_turbo_frames = 0;
         }
         last_f2_down = window.is_key_down(Key::F2);
 
@@ -271,7 +634,15 @@ fn main() {
                         Ok(disk_image) => {
                             cached_disk_image = Some(disk_image.clone());
                             machine.mem.disk2.load_disk(&disk_image);
-                            println!("Successfully loaded disk: {:?}", path.file_name().unwrap_or_default());
+                            audio_mixer.reset(machine.mem.speaker);
+                            dc_filter_x1 = 0.0;
+                            dc_filter_y1 = 0.0;
+                            last_disk_io_access_count = machine.mem.disk2.io_access_count;
+                            auto_disk_turbo_frames = 0;
+                            println!(
+                                "Successfully loaded disk: {:?}",
+                                path.file_name().unwrap_or_default()
+                            );
                             config.last_disk_path = Some(path);
                             config.save();
                         }
@@ -284,7 +655,11 @@ fn main() {
 
         let f4_down = window.is_key_down(Key::F4);
         if f4_down && !last_f4_down {
-            speed_multiplier = if speed_multiplier >= MAX_SPEED_MULTIPLIER { 1 } else { speed_multiplier + 1 };
+            speed_multiplier = if speed_multiplier >= MAX_SPEED_MULTIPLIER {
+                1
+            } else {
+                speed_multiplier + 1
+            };
             let turbo_mode = speed_multiplier > 1;
             window.set_target_fps(if turbo_mode { 120 } else { 60 });
             println!(">>> Speed Mode: CPU x{}", speed_multiplier);
@@ -297,49 +672,54 @@ fn main() {
             }
         }
 
+        let disk_io_delta = machine
+            .mem
+            .disk2
+            .io_access_count
+            .wrapping_sub(last_disk_io_access_count);
+        last_disk_io_access_count = machine.mem.disk2.io_access_count;
+        if machine.mem.disk2.motor_on && disk_io_delta >= AUTO_DISK_TURBO_IO_THRESHOLD {
+            auto_disk_turbo_frames = AUTO_DISK_TURBO_HOLD_FRAMES;
+        } else if auto_disk_turbo_frames > 0 {
+            auto_disk_turbo_frames -= 1;
+        }
+
         // Emulate CPU execution for one Frame
         let mut frame_cycles = 0;
         let mut audio_samples: Vec<f32> = Vec::with_capacity(1500);
-        let sample_rate = 44100.0;
-        let cycles_per_sample = 1_023_000.0 / sample_rate;
-        let turbo_mode = speed_multiplier > 1;
-        let target_cycles = BASE_FRAME_CYCLES * speed_multiplier;
-
-        let mut audio_high_cycles = 0.0;
-        let mut audio_total_cycles = 0.0;
+        let sample_rate: u32 = 44_100;
+        let cycles_per_sample = 1_023_000.0_f64 / sample_rate as f64;
+        let effective_speed_multiplier = if auto_disk_turbo_frames > 0 {
+            MAX_SPEED_MULTIPLIER.max(speed_multiplier)
+        } else {
+            speed_multiplier
+        };
+        let turbo_mode = effective_speed_multiplier > 1;
+        window.set_target_fps(if turbo_mode { 120 } else { 60 });
+        let target_cycles = BASE_FRAME_CYCLES * effective_speed_multiplier;
 
         while frame_cycles < target_cycles {
             let cycles = machine.step();
             frame_cycles += cycles;
-            
-            let c = cycles as f32;
-            audio_total_cycles += c;
-            if machine.mem.speaker {
-                audio_high_cycles += c;
+
+            for edge_cycle in machine.mem.take_speaker_toggle_cycles() {
+                audio_mixer.mix_until(
+                    edge_cycle as f64,
+                    cycles_per_sample,
+                    &mut dc_filter_x1,
+                    &mut dc_filter_y1,
+                    &mut audio_samples,
+                );
+                audio_mixer.speaker_on = !audio_mixer.speaker_on;
             }
 
-            unprocessed_cycles += c;
-            while unprocessed_cycles >= cycles_per_sample {
-                // Calculate the ratio of time the speaker was ON during this sample window
-                let ratio = if audio_total_cycles > 0.0 {
-                    audio_high_cycles / audio_total_cycles
-                } else {
-                    if machine.mem.speaker { 1.0 } else { 0.0 }
-                };
-                
-                // Map [0.0, 1.0] to [-0.15, 0.15] amplitude
-                let raw_sample_val = (ratio * 0.3) - 0.15;
-                
-                // Reset accumulators for the next sample
-                audio_high_cycles = 0.0;
-                audio_total_cycles = 0.0;
-
-                let filtered_val = raw_sample_val - dc_filter_x1 + 0.995 * dc_filter_y1;
-                dc_filter_x1 = raw_sample_val;
-                dc_filter_y1 = filtered_val;
-                audio_samples.push(filtered_val);
-                unprocessed_cycles -= cycles_per_sample;
-            }
+            audio_mixer.mix_until(
+                machine.total_cycles as f64,
+                cycles_per_sample,
+                &mut dc_filter_x1,
+                &mut dc_filter_y1,
+                &mut audio_samples,
+            );
         }
 
         // Audio Frame append
@@ -355,17 +735,17 @@ fn main() {
                     // If the queue is running dry (under 2 frames), we inject a tiny bit of silence
                     // to give the emulator a moment to catch up, preventing hard clipping.
                     if buf_len == 0 {
-                        let mut padding = vec![0.0; (sample_rate / 60.0) as usize];
+                        let mut padding = vec![0.0; (sample_rate / 60) as usize];
                         // smoothly transition the padding into silence
                         for x in padding.iter_mut() {
                             *x = dc_filter_y1;
                             dc_filter_y1 *= 0.995;
                         }
-                        let pad_source = rodio::buffer::SamplesBuffer::new(1, sample_rate as u32, padding);
+                        let pad_source = rodio::buffer::SamplesBuffer::new(1, sample_rate, padding);
                         s.append(pad_source);
                     }
 
-                    let source = rodio::buffer::SamplesBuffer::new(1, sample_rate as u32, audio_samples);
+                    let source = rodio::buffer::SamplesBuffer::new(1, sample_rate, audio_samples);
                     s.append(source);
                 }
             }
@@ -378,20 +758,36 @@ fn main() {
                 FRAME_COUNT += 1;
                 if FRAME_COUNT % 60 == 0 {
                     let mut row_data = String::new();
-                    for i in 0..32 { row_data.push_str(&format!("{:02X} ", machine.mem.read(0x0800 + i))); }
+                    for i in 0..32 {
+                        row_data.push_str(&format!("{:02X} ", machine.mem.read(0x0800 + i)));
+                    }
                     let mut vec_data = String::new();
-                    for i in 0..32 { vec_data.push_str(&format!("{:02X} ", machine.mem.read(0x03D0 + i))); }
+                    for i in 0..32 {
+                        vec_data.push_str(&format!("{:02X} ", machine.mem.read(0x03D0 + i)));
+                    }
                     let mut buf_data = String::new();
-                    for i in 0..16 { buf_data.push_str(&format!("{:02X} ", machine.mem.read(0x0200 + i))); }
-                    
-                    println!("Disk: T{} Index={} Latch={:02X}", 
-                        machine.mem.disk2.current_track, machine.mem.disk2.byte_index, machine.mem.disk2.data_latch);
+                    for i in 0..16 {
+                        buf_data.push_str(&format!("{:02X} ", machine.mem.read(0x0200 + i)));
+                    }
+
+                    println!(
+                        "Disk: T{} Index={} Latch={:02X}",
+                        machine.mem.disk2.current_track,
+                        machine.mem.disk2.byte_index,
+                        machine.mem.disk2.data_latch
+                    );
                     println!("Memory at $0800: {}", row_data);
                     println!("Vectors at $03D0: {}", vec_data);
                     println!("Buffer at $0200: {}", buf_data);
-                    println!("CPU PC: {:04X} A:{:02X} X:{:02X} Y:{:02X} S:{:02X} P:{:02X}", 
-                        machine.cpu.pc, machine.cpu.a, machine.cpu.x, machine.cpu.y, machine.cpu.sp, 
-                        machine.cpu.status.to_byte());
+                    println!(
+                        "CPU PC: {:04X} A:{:02X} X:{:02X} Y:{:02X} S:{:02X} P:{:02X}",
+                        machine.cpu.pc,
+                        machine.cpu.a,
+                        machine.cpu.x,
+                        machine.cpu.y,
+                        machine.cpu.sp,
+                        machine.cpu.status.to_byte()
+                    );
                 }
             }
         }
@@ -405,7 +801,9 @@ fn main() {
             video.render_lores_frame(&machine.mem, &char_rom);
         }
 
-        window.update_with_buffer(&video.frame_buffer, SCREEN_WIDTH, SCREEN_HEIGHT).unwrap();
+        window
+            .update_with_buffer(&video.frame_buffer, SCREEN_WIDTH, SCREEN_HEIGHT)
+            .unwrap();
 
         if !turbo_mode && last_cycle.elapsed().as_secs() >= 1 {
             // Print screen rows
@@ -418,9 +816,15 @@ fn main() {
                 for col in 0..40 {
                     let char_code = machine.mem.ram[row_addr + col];
                     let ascii = char_code & 0x7F;
-                    if ascii >= 0x20 && ascii <= 0x7E { line.push(ascii as char); } else { line.push('.'); }
+                    if ascii >= 0x20 && ascii <= 0x7E {
+                        line.push(ascii as char);
+                    } else {
+                        line.push('.');
+                    }
                 }
-                if line.chars().any(|c| c != '.') { println!("Row {:2}: {}", row, line); }
+                if line.chars().any(|c| c != '.') {
+                    println!("Row {:2}: {}", row, line);
+                }
             }
             last_cycle = Instant::now();
         }

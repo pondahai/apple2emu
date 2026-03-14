@@ -17,7 +17,11 @@ fn main() {
                         let b = buf[c * 8 + row];
                         let mut s = String::new();
                         for bit in 0..8 {
-                            if b & (1 << bit) != 0 { s.push('#'); } else { s.push(' '); }
+                            if b & (1 << bit) != 0 {
+                                s.push('#');
+                            } else {
+                                s.push(' ');
+                            }
                         }
                         writeln!(out, "{}", s).unwrap();
                     }

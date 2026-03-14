@@ -1,6 +1,6 @@
+use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use directories::ProjectDirs;
 
 #[derive(Serialize, Deserialize, Default, Debug)]
 pub struct EmulatorConfig {

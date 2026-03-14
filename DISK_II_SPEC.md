@@ -1,4 +1,4 @@
-# 📊 Apple II Disk II 完整技術規格表
+﻿# 📊 Apple II Disk II 完整技術規格表
 
 這份文件彙整了 Apple II Disk II 控制器與磁碟系統的硬體規範、時序參數、記憶體佈置及韌體入口點，作為模擬器開發的重要參考。
 

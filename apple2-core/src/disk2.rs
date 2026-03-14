@@ -1,6 +1,6 @@
 extern crate alloc;
+use crate::nibble::{TrackData, nibblize_dsk};
 use alloc::vec::Vec;
-use crate::nibble::{nibblize_dsk, TrackData};
 
 pub struct Disk2 {
     pub rom: [u8; 256],
@@ -20,20 +20,32 @@ pub struct Disk2 {
     pub data_latch: u8,
     pub write_ready: bool,
     pub write_bit_phase: u8,
+    pub io_access_count: u64,
 }
 
 impl Disk2 {
     pub fn new() -> Self {
         let mut tracks = Vec::with_capacity(35);
-        for _ in 0..35 { tracks.push(TrackData::new()); }
+        for _ in 0..35 {
+            tracks.push(TrackData::new());
+        }
         Self {
-            rom: [0; 256], motor_on: false, drive_select: 1, write_mode: false, load_mode: false,
-            current_track: 0, tracks, is_disk_loaded: false, phases: [false; 4],
+            rom: [0; 256],
+            motor_on: false,
+            drive_select: 1,
+            write_mode: false,
+            load_mode: false,
+            current_track: 0,
+            tracks,
+            is_disk_loaded: false,
+            phases: [false; 4],
             current_qtr_track: 0,
-            byte_index: 0, cycles_accumulator: 0,
+            byte_index: 0,
+            cycles_accumulator: 0,
             data_latch: 0,
             write_ready: false,
             write_bit_phase: 0,
+            io_access_count: 0,
         }
     }
 
@@ -58,8 +70,10 @@ impl Disk2 {
         if self.motor_on {
             if switch == 0x0C {
                 // $C0EC (Q6_OFF): Read Data
-                if !self.is_disk_loaded { return 0x00; }
-                
+                if !self.is_disk_loaded {
+                    return 0x00;
+                }
+
                 // If Q7 is ON (load_mode), we are shifting data out,
                 // do NOT destructively read the latch.
                 if self.load_mode {
@@ -67,28 +81,27 @@ impl Disk2 {
                     self.write_ready = false;
                     return if ready { 0x80 } else { 0x00 };
                 }
-                
+
                 let val = self.data_latch;
                 // Reading data when Q6=0 and Q7=0 clears the MSB (destructive read)
                 self.data_latch &= 0x7F;
                 return val;
-
             } else if switch == 0x0D {
                 // Q7=0,Q6=1 write-protect sense path.
                 // Current emulator defaults to writable media.
-                return 0x00; 
+                return 0x00;
             }
         }
-        
+
         // Default return for other switches / motor off
         // Usually returning random bus noise, but 0x00 is safe.
         0x00
     }
 
-    pub fn write_io(&mut self, addr: u16, data: u8) { 
-        self.handle_io(addr); 
+    pub fn write_io(&mut self, addr: u16, data: u8) {
+        self.handle_io(addr);
         let switch = addr & 0x0F;
-        
+
         // When Q7=1 (load_mode) and Q6=1 (write_mode), we are in Write Load state.
         // The data bus is loaded into the controller's data register.
         // Latch loads on Q6_ON ($C0ED) writes.
@@ -98,14 +111,15 @@ impl Disk2 {
     }
 
     fn handle_io(&mut self, addr: u16) {
+        self.io_access_count = self.io_access_count.wrapping_add(1);
         let switch = (addr & 0x0F) as usize;
         match switch {
-            0x00..=0x07 => { 
+            0x00..=0x07 => {
                 let phase = switch >> 1;
                 let on = (switch & 1) != 0;
                 if on != self.phases[phase] {
-                    self.phases[phase] = on; 
-                    self.step_motor(); 
+                    self.phases[phase] = on;
+                    self.step_motor();
                 }
             }
             0x08 => self.motor_on = false,
@@ -124,10 +138,9 @@ impl Disk2 {
             _ => {}
         }
     }
-    
+
     fn step_motor(&mut self) {
-        let phase_mask =
-            (self.phases[0] as u8)
+        let phase_mask = (self.phases[0] as u8)
             | ((self.phases[1] as u8) << 1)
             | ((self.phases[2] as u8) << 2)
             | ((self.phases[3] as u8) << 3);
@@ -151,7 +164,11 @@ impl Disk2 {
         };
 
         let base = self.current_qtr_track.div_euclid(8) * 8;
-        let candidates = [base + target_mod, base + target_mod - 8, base + target_mod + 8];
+        let candidates = [
+            base + target_mod,
+            base + target_mod - 8,
+            base + target_mod + 8,
+        ];
         let mut target_qtr = self.current_qtr_track;
         let mut best_diff = i32::MAX;
 
@@ -211,10 +228,15 @@ impl Disk2 {
     }
 
     pub fn reset(&mut self) {
-        self.motor_on = false; self.current_track = 0; self.byte_index = 0;
-        self.cycles_accumulator = 0; self.data_latch = 0;
+        self.motor_on = false;
+        self.current_track = 0;
+        self.byte_index = 0;
+        self.cycles_accumulator = 0;
+        self.data_latch = 0;
         self.write_ready = false;
         self.write_bit_phase = 0;
-        self.phases = [false; 4]; self.current_qtr_track = 0;
+        self.phases = [false; 4];
+        self.current_qtr_track = 0;
+        self.io_access_count = 0;
     }
 }

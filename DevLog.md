@@ -584,3 +584,100 @@
     * `cargo test -p apple2-core disk2_test -- --nocapture`
     * `cargo run --quiet --bin save_smoke`
     * `cargo run --quiet --bin goonies_probe`
+
+## 34. 最小 `byte_index +2` seek-bias：DOS 不壞，但 `goonies` 完全無位移，已撤回 (2026-03-14)
+* **本輪實作**：
+  * 放棄 byte 混合，改做更貼近 rotational alignment 的最小實驗：
+    * 只在 `goonies` 的 `$0400` seek/consumer 路徑附近 arm。
+    * 當 `step_motor()` 真正跨軌時，對接下來 `4` 個 read bytes 套固定 `byte_index + 2` 偏移。
+  * 實驗範圍仍維持非常局部：
+    * 不改一般 DOS 路徑；
+    * 不改寫入路徑；
+    * 不改 `data_latch` destructive read 規則；
+    * 只改跨軌後前幾個 read byte 的取樣位置。
+* **驗證結果**：
+  * `cargo test -p apple2-core disk2_test -- --nocapture`：通過。
+  * `cargo run --quiet --bin save_smoke`：通過，`Tracks changed after SAVE flow: 2`。
+  * `cargo run --quiet --bin goonies_probe | rg "entered 0400 consumer|path059x|final pc|pc hits"`：結果與基線完全相同。
+* **觀察**：
+  * `goonies` 仍然：
+    * 命中 `sector 02 / 04 / 06`
+    * 進入 `entered 0400 consumer`
+    * 最後卡在原本同一個 hot loop
+  * 關鍵數字完全沒有位移：
+    * `final pc=051F`
+    * `pc hits: 045F=144364 0460=144364 051F=324685 0520=324684`
+* **結論**：
+  * 最小的 rotational alignment 偏移 `+2` 本身不足以影響 loader。
+  * 這說明問題不是單純「跨軌後前幾個 byte 的固定小幅 index 偏差」。
+  * 若要繼續走 alignment 方向，下一步應該：
+    * 做有系統的 offset sweep（`+1/+2/+4/+8`）；
+    * 或改成 phase-off / last-step bias 類型的機械保持語意，而不是固定 index 偏移。
+* **處置**：
+  * 本輪 `byte_index +2` 實驗碼已完整撤回，恢復乾淨基線。
+
+## 35. `byte_index` offset sweep (`+1/+2/+4/+8`)：全部零反應，alignment 固定偏移分支可判死 (2026-03-14)
+* **本輪做法**：
+  * 把上一輪的 `byte_index` seek-bias 暫時做成 probe 專用 sweep。
+  * 依序測：
+    * `offset=0`（基線）
+    * `offset=1`
+    * `offset=2`
+    * `offset=4`
+    * `offset=8`
+  * 每一輪都只比較：
+    * `final pc`
+    * `pc hits: 045F / 0460 / 051F / 0520`
+* **驗證前提**：
+  * `cargo test -p apple2-core disk2_test -- --nocapture`：通過。
+  * `cargo run --quiet --bin save_smoke`：通過。
+  * 表示 sweep 期間 DOS 基線沒有被打壞。
+* **sweep 結果**：
+  * 五組 offset 的結果完全一致：
+    * `final pc=051F`
+    * `pc hits: 045F=144364 0460=144364 051F=324685 0520=324684`
+  * 換句話說：
+    * `+1` 無效
+    * `+2` 無效
+    * `+4` 無效
+    * `+8` 無效
+* **本輪結論**：
+  * 「跨軌後前幾個 byte 套固定小幅 `byte_index` 偏移」這整條分支可以直接判死。
+  * 問題不像是單純的固定 rotational phase 偏差。
+  * 如果 alignment 還是嫌疑點，那也更可能是：
+    * 非固定 offset；
+    * 和 phase-off / last-step 狀態耦合的動態偏置；
+    * 或更接近 quarter-track 取樣位置的模型，而不是單純 `byte_index += N`。
+* **處置**：
+  * sweep 專用實驗碼已完整撤回，恢復乾淨基線。
+
+## 36. `phases=0000` 最小 head-hold：DOS 不壞，但 `goonies` 仍完全零位移，已撤回 (2026-03-14)
+* **本輪實作**：
+  * 改測「全相位關閉後是否應保留 last-step 機械偏置」。
+  * 實作方式維持極窄：
+    * 只在 `goonies` 的 `$0400` seek/consumer 路徑附近啟用；
+    * 只有在真正跨軌之後；
+    * 並且進入 `phases=0000` 後，前 `4` 個 read bytes 才暫時讀回上一軌 `hold_track`。
+  * 這比之前的跨軌 settle 更保守，因為它不影響 phase 仍為 ON 的 seek 過程，只碰「seek 完後全相位關閉」的短窗口。
+* **驗證結果**：
+  * `cargo test -p apple2-core disk2_test -- --nocapture`：通過。
+  * `cargo run --quiet --bin save_smoke`：通過，`Tracks changed after SAVE flow: 2`。
+  * `cargo run --quiet --bin goonies_probe | rg "entered 0400 consumer|path059x|final pc|pc hits"`：與基線完全相同。
+* **觀察**：
+  * `goonies` 仍然：
+    * 命中 `sector 02 / 04 / 06`
+    * 進入 `entered 0400 consumer`
+    * 最後卡在相同的 `$051F/$0520` 熱點形態
+  * 關鍵結果仍完全不變：
+    * `final pc=051F`
+    * `pc hits: 045F=144364 0460=144364 051F=324685 0520=324684`
+* **結論**：
+  * 最小版 phase-off head-hold 也沒有任何效果。
+  * 這表示問題不像是：
+    * 固定小幅 `byte_index` 偏移；
+    * 也不像是「全相位關閉後短暫沿用上一軌」這種簡化的機械保持模型。
+  * 若方向仍要沿著真機副作用往下挖，下一層更可能是：
+    * quarter-track 對實體磁訊號取樣位置的模型；
+    * 或 nibble/track 表示法本身不足以承載 `The Goonies` 所依賴的保護語意。
+* **處置**：
+  * 本輪 head-hold 實驗碼已完整撤回，恢復乾淨基線。

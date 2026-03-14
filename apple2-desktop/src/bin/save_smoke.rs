@@ -42,7 +42,11 @@ fn pump(machine: &mut Apple2Machine, queue: &mut VecDeque<u8>, target_cycles: u6
 
 fn enqueue_line(queue: &mut VecDeque<u8>, line: &str) {
     for b in line.bytes() {
-        queue.push_back(if b.is_ascii_lowercase() { b.to_ascii_uppercase() } else { b });
+        queue.push_back(if b.is_ascii_lowercase() {
+            b.to_ascii_uppercase()
+        } else {
+            b
+        });
     }
     queue.push_back(0x0D);
 }
@@ -65,7 +69,13 @@ fn main() {
     machine.load_rom(&main_rom[main_rom.len() - 12288..]);
     machine.mem.disk2.load_boot_rom(&disk_rom);
     machine.mem.disk2.load_disk(&disk);
-    let before_tracks = machine.mem.disk2.tracks.iter().map(|t| t.raw_bytes).collect::<Vec<_>>();
+    let before_tracks = machine
+        .mem
+        .disk2
+        .tracks
+        .iter()
+        .map(|t| t.raw_bytes)
+        .collect::<Vec<_>>();
     machine.power_on();
 
     let mut q = VecDeque::new();

@@ -1,4 +1,4 @@
-# Apple II Emulator - Local Development Notes (DO NOT COMMIT)
+﻿# Apple II Emulator - Local Development Notes (DO NOT COMMIT)
 
 ## 執行環境
 - **OS**: Windows 10/11 (win32)

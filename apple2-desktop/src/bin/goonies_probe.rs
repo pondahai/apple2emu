@@ -100,8 +100,16 @@ fn nearest_prologue_distance(track: &TrackData, idx: usize) -> usize {
             && track.raw_bytes[(i + 1) % track.length] == 0xAA
             && track.raw_bytes[(i + 2) % track.length] == 0x96
         {
-            let forward = if i >= idx { i - idx } else { track.length - idx + i };
-            let backward = if idx >= i { idx - i } else { idx + track.length - i };
+            let forward = if i >= idx {
+                i - idx
+            } else {
+                track.length - idx + i
+            };
+            let backward = if idx >= i {
+                idx - i
+            } else {
+                idx + track.length - i
+            };
             best = best.min(forward.min(backward));
         }
     }
@@ -145,6 +153,7 @@ fn main() {
     let mut ret_0318_logs = 0u32;
     let mut path_059x_logs = 0u32;
     let mut path_0400_logs = 0u32;
+    let mut post_seek_logs = 0u32;
     let mut dumped_0400_state = false;
     let mut stepper_logs = 0u32;
 
@@ -237,8 +246,10 @@ fn main() {
             rts_0380_logs += 1;
         }
 
-        if matches!(pc_before, 0x0596 | 0x05AA | 0x05B2 | 0x05BA | 0x05CD | 0x05D4)
-            && track_before == 23
+        if matches!(
+            pc_before,
+            0x0596 | 0x05AA | 0x05B2 | 0x05BA | 0x05CD | 0x05D4
+        ) && track_before == 23
             && path_059x_logs < 120
         {
             println!(
@@ -300,7 +311,7 @@ fn main() {
                 | 0x0512
                 | 0x051C
                 | 0x052A
-            ) && track_before == 23
+        ) && track_before == 23
             && path_0400_logs < 200
         {
             println!(
@@ -326,8 +337,75 @@ fn main() {
             path_0400_logs += 1;
         }
 
-        if matches!(pc_before, 0x044D | 0x0450 | 0x0457 | 0x045D | 0x0460 | 0x0467)
-            && track_before == 23
+        if matches!(
+            pc_before,
+            0x0500
+                | 0x0504
+                | 0x050A
+                | 0x0512
+                | 0x0515
+                | 0x0519
+                | 0x051C
+                | 0x051F
+                | 0x0520
+                | 0x0524
+                | 0x052A
+        ) && track_before == 23
+            && post_seek_logs < 240
+        {
+            println!(
+                "postseek pc={:04X} next={:04X} a={:02X} x={:02X} y={:02X} sp={:02X} p={:02X} e4={:02X} e5={:02X} e7={:02X} e8={:02X} e9={:02X} fe={:02X} ff={:02X} 028e={:02X} 026e={:02X} 0269={:02X} 05e4={:02X} 05ec={:02X} 05ed={:02X} idx={} latch={:02X} qtr={} phases={}{}{}{}",
+                pc_before,
+                machine.cpu.pc,
+                machine.cpu.a,
+                machine.cpu.x,
+                machine.cpu.y,
+                machine.cpu.sp,
+                machine.cpu.status.to_byte(),
+                machine.mem.ram[0x00E4],
+                machine.mem.ram[0x00E5],
+                machine.mem.ram[0x00E7],
+                machine.mem.ram[0x00E8],
+                machine.mem.ram[0x00E9],
+                machine.mem.ram[0x00FE],
+                machine.mem.ram[0x00FF],
+                machine.mem.ram[0x028E],
+                machine.mem.ram[0x026E],
+                machine.mem.ram[0x0269],
+                machine.mem.ram[0x05E4],
+                machine.mem.ram[0x05EC],
+                machine.mem.ram[0x05ED],
+                machine.mem.disk2.byte_index,
+                machine.mem.disk2.data_latch,
+                machine.mem.disk2.current_qtr_track,
+                if machine.mem.disk2.phases[0] {
+                    '1'
+                } else {
+                    '0'
+                },
+                if machine.mem.disk2.phases[1] {
+                    '1'
+                } else {
+                    '0'
+                },
+                if machine.mem.disk2.phases[2] {
+                    '1'
+                } else {
+                    '0'
+                },
+                if machine.mem.disk2.phases[3] {
+                    '1'
+                } else {
+                    '0'
+                },
+            );
+            post_seek_logs += 1;
+        }
+
+        if matches!(
+            pc_before,
+            0x044D | 0x0450 | 0x0457 | 0x045D | 0x0460 | 0x0467
+        ) && track_before == 23
             && stepper_logs < 200
         {
             println!(
@@ -345,10 +423,26 @@ fn main() {
                 machine.mem.disk2.current_track,
                 machine.mem.disk2.byte_index,
                 machine.mem.disk2.data_latch,
-                if machine.mem.disk2.phases[0] { '1' } else { '0' },
-                if machine.mem.disk2.phases[1] { '1' } else { '0' },
-                if machine.mem.disk2.phases[2] { '1' } else { '0' },
-                if machine.mem.disk2.phases[3] { '1' } else { '0' },
+                if machine.mem.disk2.phases[0] {
+                    '1'
+                } else {
+                    '0'
+                },
+                if machine.mem.disk2.phases[1] {
+                    '1'
+                } else {
+                    '0'
+                },
+                if machine.mem.disk2.phases[2] {
+                    '1'
+                } else {
+                    '0'
+                },
+                if machine.mem.disk2.phases[3] {
+                    '1'
+                } else {
+                    '0'
+                },
             );
             stepper_logs += 1;
         }
@@ -373,7 +467,10 @@ fn main() {
 
         if !dumped_loader_state && (0x0450..=0x0530).contains(&machine.cpu.pc) {
             dumped_loader_state = true;
-            println!("entered loader region at cycle {} pc={:04X}", machine.total_cycles, machine.cpu.pc);
+            println!(
+                "entered loader region at cycle {} pc={:04X}",
+                machine.total_cycles, machine.cpu.pc
+            );
             dump_ram(&machine, 0x0020, 0x30);
             dump_ram(&machine, 0x0260, 0x30);
             dump_ram(&machine, 0x0318, 0x40);
@@ -386,9 +483,7 @@ fn main() {
         if same_pc_count >= 100_000 {
             println!(
                 "stuck loop detected after {} cycles at pc={:04X} last_step_cycles={}",
-                machine.total_cycles,
-                machine.cpu.pc,
-                cycles
+                machine.total_cycles, machine.cpu.pc, cycles
             );
             break;
         }

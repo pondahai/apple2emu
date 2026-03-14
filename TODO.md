@@ -1,4 +1,4 @@
-# Apple II Emulator - Task List
+﻿# Apple II Emulator - Task List
 
 ## 第一階段：完美開機 (已完成)
 * [x] **磁碟加載成功** (2026-03-12)

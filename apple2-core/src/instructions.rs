@@ -1,5 +1,5 @@
-use crate::memory::Memory;
 use crate::cpu::{AddressingMode, CPU};
+use crate::memory::Memory;
 
 impl CPU {
     // --- Load/Store ---
@@ -169,10 +169,22 @@ impl CPU {
         self.update_zero_and_negative_flags(value);
     }
 
-    pub(crate) fn inx(&mut self) { self.x = self.x.wrapping_add(1); self.update_zero_and_negative_flags(self.x); }
-    pub(crate) fn iny(&mut self) { self.y = self.y.wrapping_add(1); self.update_zero_and_negative_flags(self.y); }
-    pub(crate) fn dex(&mut self) { self.x = self.x.wrapping_sub(1); self.update_zero_and_negative_flags(self.x); }
-    pub(crate) fn dey(&mut self) { self.y = self.y.wrapping_sub(1); self.update_zero_and_negative_flags(self.y); }
+    pub(crate) fn inx(&mut self) {
+        self.x = self.x.wrapping_add(1);
+        self.update_zero_and_negative_flags(self.x);
+    }
+    pub(crate) fn iny(&mut self) {
+        self.y = self.y.wrapping_add(1);
+        self.update_zero_and_negative_flags(self.y);
+    }
+    pub(crate) fn dex(&mut self) {
+        self.x = self.x.wrapping_sub(1);
+        self.update_zero_and_negative_flags(self.x);
+    }
+    pub(crate) fn dey(&mut self) {
+        self.y = self.y.wrapping_sub(1);
+        self.update_zero_and_negative_flags(self.y);
+    }
 
     // --- Shifts / Rotates ---
     pub(crate) fn asl_acc(&mut self) {
@@ -244,8 +256,14 @@ impl CPU {
         if condition {
             let old_pc = self.pc;
             self.pc = self.pc.wrapping_add(offset as i16 as u16);
-            if (old_pc & 0xFF00) != (self.pc & 0xFF00) { 2 } else { 1 }
-        } else { 0 }
+            if (old_pc & 0xFF00) != (self.pc & 0xFF00) {
+                2
+            } else {
+                1
+            }
+        } else {
+            0
+        }
     }
 
     // --- Jumps / Branches ---
@@ -272,32 +290,68 @@ impl CPU {
         let p = self.stack_pop(mem);
         self.status.from_byte(p);
         self.status.b = false; // B flag is not restored from stack (Bug 3)
-        self.status.u = true;  // U flag always 1
+        self.status.u = true; // U flag always 1
         let lo = self.stack_pop(mem) as u16;
         let hi = self.stack_pop(mem) as u16;
         self.pc = (hi << 8) | lo;
     }
 
     // --- Transfers ---
-    pub(crate) fn tax(&mut self) { self.x = self.a; self.update_zero_and_negative_flags(self.x); }
-    pub(crate) fn tay(&mut self) { self.y = self.a; self.update_zero_and_negative_flags(self.y); }
-    pub(crate) fn txa(&mut self) { self.a = self.x; self.update_zero_and_negative_flags(self.a); }
-    pub(crate) fn tya(&mut self) { self.a = self.y; self.update_zero_and_negative_flags(self.a); }
-    pub(crate) fn tsx(&mut self) { self.x = self.sp; self.update_zero_and_negative_flags(self.x); }
-    pub(crate) fn txs(&mut self) { self.sp = self.x; }
+    pub(crate) fn tax(&mut self) {
+        self.x = self.a;
+        self.update_zero_and_negative_flags(self.x);
+    }
+    pub(crate) fn tay(&mut self) {
+        self.y = self.a;
+        self.update_zero_and_negative_flags(self.y);
+    }
+    pub(crate) fn txa(&mut self) {
+        self.a = self.x;
+        self.update_zero_and_negative_flags(self.a);
+    }
+    pub(crate) fn tya(&mut self) {
+        self.a = self.y;
+        self.update_zero_and_negative_flags(self.a);
+    }
+    pub(crate) fn tsx(&mut self) {
+        self.x = self.sp;
+        self.update_zero_and_negative_flags(self.x);
+    }
+    pub(crate) fn txs(&mut self) {
+        self.sp = self.x;
+    }
 
     // --- Stack ---
-    pub(crate) fn pha<M: Memory>(&mut self, mem: &mut M) { self.stack_push(mem, self.a); }
-    pub(crate) fn pla<M: Memory>(&mut self, mem: &mut M) { self.a = self.stack_pop(mem); self.update_zero_and_negative_flags(self.a); }
+    pub(crate) fn pha<M: Memory>(&mut self, mem: &mut M) {
+        self.stack_push(mem, self.a);
+    }
+    pub(crate) fn pla<M: Memory>(&mut self, mem: &mut M) {
+        self.a = self.stack_pop(mem);
+        self.update_zero_and_negative_flags(self.a);
+    }
 
     // --- Flags ---
-    pub(crate) fn clc(&mut self) { self.status.c = false; }
-    pub(crate) fn sec(&mut self) { self.status.c = true; }
-    pub(crate) fn cli(&mut self) { self.status.i = false; }
-    pub(crate) fn sei(&mut self) { self.status.i = true; }
-    pub(crate) fn clv(&mut self) { self.status.v = false; }
-    pub(crate) fn cld(&mut self) { self.status.d = false; }
-    pub(crate) fn sed(&mut self) { self.status.d = true; }
+    pub(crate) fn clc(&mut self) {
+        self.status.c = false;
+    }
+    pub(crate) fn sec(&mut self) {
+        self.status.c = true;
+    }
+    pub(crate) fn cli(&mut self) {
+        self.status.i = false;
+    }
+    pub(crate) fn sei(&mut self) {
+        self.status.i = true;
+    }
+    pub(crate) fn clv(&mut self) {
+        self.status.v = false;
+    }
+    pub(crate) fn cld(&mut self) {
+        self.status.d = false;
+    }
+    pub(crate) fn sed(&mut self) {
+        self.status.d = true;
+    }
 
     pub(crate) fn nop(&mut self) {}
 
@@ -331,6 +385,6 @@ impl CPU {
         let p = self.stack_pop(mem);
         self.status.from_byte(p);
         self.status.b = false; // B flag is always false inside CPU (Bug 2)
-        self.status.u = true;  // U flag always 1
+        self.status.u = true; // U flag always 1
     }
 }
