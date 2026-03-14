@@ -3,7 +3,7 @@ use apple2_core::memory::Memory;
 use apple2_core::video::{SCREEN_HEIGHT, SCREEN_WIDTH, Video};
 use flate2::read::GzDecoder;
 use minifb::{Key, Window, WindowOptions};
-use rodio::{OutputStream, Sink};
+use rodio::{OutputStream, OutputStreamHandle, Sink};
 use std::io::Read;
 use std::time::Instant;
 
@@ -27,9 +27,9 @@ impl AudioMixerState {
         }
     }
 
-    fn reset(&mut self, speaker_on: bool) {
-        self.next_sample_cycle = 0.0;
-        self.last_mix_cycle = 0.0;
+    fn reset_at(&mut self, cycle: f64, cycles_per_sample: f64, speaker_on: bool) {
+        self.next_sample_cycle = cycle + cycles_per_sample;
+        self.last_mix_cycle = cycle;
         self.speaker_high_cycles = 0.0;
         self.speaker_on = speaker_on;
     }
@@ -124,6 +124,26 @@ fn decode_disk_image(path: &std::path::Path, raw_data: Vec<u8>) -> Result<Vec<u8
     Ok(disk[..EXPECTED_DSK_BYTES].to_vec())
 }
 
+fn rebuild_sink(audio_handle: Option<&OutputStreamHandle>) -> Option<Sink> {
+    audio_handle.and_then(|handle| Sink::try_new(handle).ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioMixerState;
+
+    #[test]
+    fn reset_at_aligns_mixer_to_current_cycle() {
+        let mut mixer = AudioMixerState::new(false);
+        mixer.reset_at(12_345.0, 23.0, true);
+
+        assert_eq!(mixer.last_mix_cycle, 12_345.0);
+        assert_eq!(mixer.next_sample_cycle, 12_368.0);
+        assert_eq!(mixer.speaker_high_cycles, 0.0);
+        assert!(mixer.speaker_on);
+    }
+}
+
 fn update_window_title(window: &mut Window, speed_multiplier: u32, auto_disk_turbo_active: bool) {
     let title = if auto_disk_turbo_active {
         "Apple II Emulator (Rust no_std core) [AUTO TURBO UNTHROTTLED]".to_string()
@@ -164,12 +184,11 @@ fn main() {
 
     // Setup an audio stream
     let audio_device = OutputStream::try_default();
-    let (mut _stream, mut sink) = (None, None);
+    let (mut _stream, mut audio_handle, mut sink) = (None, None, None);
     if let Ok((s, sh)) = audio_device {
         _stream = Some(s);
-        if let Ok(sk) = Sink::try_new(&sh) {
-            sink = Some(sk);
-        }
+        audio_handle = Some(sh.clone());
+        sink = rebuild_sink(audio_handle.as_ref());
     } else {
         println!("Warning: Could not initialize audio output.");
     }
@@ -273,6 +292,8 @@ fn main() {
     let mut dc_filter_x1: f32 = 0.0;
     let mut dc_filter_y1: f32 = 0.0;
     let mut audio_mixer = AudioMixerState::new(machine.mem.speaker);
+    let sample_rate: u32 = 44_100;
+    let cycles_per_sample = 1_023_000.0_f64 / sample_rate as f64;
     update_window_title(&mut window, speed_multiplier, false);
 
     while window.is_open() && !window.is_key_down(Key::F10) {
@@ -626,7 +647,8 @@ fn main() {
                 }
                 machine.reset();
             }
-            audio_mixer.reset(machine.mem.speaker);
+            sink = rebuild_sink(audio_handle.as_ref());
+            audio_mixer.reset_at(machine.total_cycles as f64, cycles_per_sample, machine.mem.speaker);
             dc_filter_x1 = 0.0;
             dc_filter_y1 = 0.0;
         }
@@ -643,7 +665,12 @@ fn main() {
                         Ok(disk_image) => {
                             cached_disk_image = Some(disk_image.clone());
                             machine.mem.disk2.load_disk(&disk_image);
-                            audio_mixer.reset(machine.mem.speaker);
+                            sink = rebuild_sink(audio_handle.as_ref());
+                            audio_mixer.reset_at(
+                                machine.total_cycles as f64,
+                                cycles_per_sample,
+                                machine.mem.speaker,
+                            );
                             dc_filter_x1 = 0.0;
                             dc_filter_y1 = 0.0;
                             println!(
@@ -683,8 +710,6 @@ fn main() {
         // Emulate CPU execution for one Frame
         let mut frame_cycles = 0;
         let mut audio_samples: Vec<f32> = Vec::with_capacity(1500);
-        let sample_rate: u32 = 44_100;
-        let cycles_per_sample = 1_023_000.0_f64 / sample_rate as f64;
         let auto_disk_turbo_active = machine.mem.disk2.motor_on;
         let effective_speed_multiplier = if auto_disk_turbo_active {
             MAX_SPEED_MULTIPLIER
