@@ -165,3 +165,133 @@
   * `The Goonies` 很可能使用對 Disk II 後段讀取語意較敏感的商業 loader / 保護機制。
   * 因此問題最合理地仍指向 Disk II read sequencer / `$C08C` polling 相容性缺口，而不是 `.gz` 載入、GUI 路徑或一般 DOS 啟動流程。
 
+## 21. `goonies_probe` 續追：`$0380` 的 `$C08C` polling 已能命中 address field (2026-03-14)
+* **本輪追加觀測**：
+  * 擴充 `apple2-desktop/src/bin/goonies_probe.rs`：
+    * 列出 track 23 上 `D5 AA 96` address prologue 的實際分布。
+    * 追蹤 `$0380` 例程內各個 `LDA $C08C,X` 讀點。
+    * 在 `$0380` 成功 `RTS` 時記錄解出的 `volume/track/sector/checksum` 與 caller 預期值。
+* **關鍵新發現**：
+  * 在 stuck 狀態的 track 23 上，probe 可穩定看到 address prologue 出現在固定位置：
+    * `64, 460, 856, ...`，間距為 `396` bytes，符合目前 nibblized DOS track 結構。
+  * `$0380` 並不是完全卡死在找不到 `D5 AA 96`：
+    * trace 明確顯示 `FF ... FF D5 AA 96` 可被正確讀到。
+    * 後續 4-and-4 address bytes 也正確解出，例如 `vol=FE`, `trk=17`, `sec=0B/0C/...`。
+  * caller 在 `ret=0535` 時，確實只是因為「目前掃到的 sector 不是期待值」而繼續重試。
+  * 當掃到 caller 期待的 sector（例如 `expect_sec=02 -> sec=02`，以及後續 `04 -> 04`、`06 -> 06`）時，流程會前進到下一段，而不是永遠卡死在 `$0380`。
+* **本輪結論修正**：
+  * 先前把問題集中在「`$0380` / `$C08C` polling 抓不到 prologue」這個假設，現在已被 probe 證偽。
+  * 目前更合理的卡點已往後移：
+    * address field search / header decode **基本可用**；
+    * 真正異常更可能出在 **命中正確 sector 之後的 data-field 讀取 / decode / 後續控制流**。
+* **下一步方向**：
+  * 續追 caller 在 sector 命中後進入的下一段路徑（目前從 trace 看已不只是 `$0380` 問題）。
+  * 優先觀察：
+    * `$0596` 後續資料場讀取流程。
+    * `$0318` 一帶的 data-field decode 是否在正確 header 命中後仍回傳錯誤狀態。
+
+## 22. `goonies_probe` 再續追：sector 命中後已前進到 `$0400` consumer 路徑 (2026-03-14)
+* **本輪追加觀測**：
+  * 對 `goonies_probe` 再加：
+    * `$0318` 區塊記憶體 dump。
+    * `$0596/$05AA/$05B2/$05BA/$05CD/$05D4` 附近 path trace。
+  * 目的是確認「命中正確 sector 後是否真的有離開 `$0380` / `$0535` 重試路徑」。
+* **關鍵新發現**：
+  * RAM `$0318` 內容顯示這裡確實還有另一段 data-field 讀取例程，會尋找 `D5 AA AD`。
+  * 當 `$0380` 命中 caller 期待的 sector 時，不只會離開 `$0535` 重試點，還會進一步回到 `ret=059A`。
+  * 之後 probe 看到穩定的後續路徑：
+    * `05B2 -> 05BA -> 05CD`
+    * 接著由 `05D8` 的 `JMP $0400` 進入下一段 consumer 流程。
+  * 這表示目前流程其實能：
+    * 找到正確 address field；
+    * 命中正確 sector；
+    * 至少部分前進到後續 loader 邏輯。
+* **目前更精確的結論**：
+  * 問題已不再集中於 `$0380` 的 address-field polling。
+  * 卡點更可能位於：
+    * `$0318` data-field 讀取/解碼本身；
+    * 或 `$0400` 之後消費 decoded data 的流程。
+  * 也就是說，之前「先修 `$C08C` polling」這條主假設，現在應下修優先度。
+* **下一步方向**：
+  * 直接追 `$0400` consumer 路徑：
+    * 對 `JMP $0400` 後的關鍵分支與 buffer 狀態做 trace。
+  * 同時補抓：
+    * `$0318` 例程的真正 return 點與 carry/accumulator 結果；
+    * sector 命中後寫入的 decode buffer 是否內容異常。
+
+## 23. `goonies_probe` 再下鑽：`$0400` 後主要卡在 `$045D/$045F` 倒數等待段 (2026-03-14)
+* **本輪追加觀測**：
+  * 對 `$0400` consumer 路徑加 trace。
+  * 在首次進入 `$0400` 時 dump：
+    * `00E0..00EF`
+    * `0200..023F`
+    * `0280..02BF`
+    * `0300..03FF`
+    * `0400..047F`
+* **關鍵新發現**：
+  * 命中正確 sector 並經過 `05B2 -> 05BA -> 05CD` 後，流程確實會進入 `$0400`。
+  * `$0400` 內真正大量出現的 hot spot 不是前段判斷，而是：
+    * `$045D -> $045F`
+  * 這段會讓：
+    * `A` 從較大值一路倒數；
+    * `FE/FF` 持續前進；
+    * Disk byte index 也持續轉動。
+  * 從行為上看，這更像是 loader 正在等待某種 timing / step / rotational position 條件，而不是單純 data-field 一進來就立刻壞掉。
+* **目前最合理的解讀**：
+  * 問題焦點已從：
+    * `$0380` address-field polling，
+    * 移到 `$0318` data-field / `$0400` consumer，
+    * 現在又更集中到 `$0400` 內部的等待/步進控制段。
+  * 換句話說，Disk II 相容性缺口仍然可能存在，但更像是：
+    * loader 所需的步進/旋轉/ready 條件與目前模擬語意仍有偏差。
+* **下一步方向**：
+  * 直接對 `$044D..$0467` 這段等待/控制路徑做更細 trace。
+  * 需要特別對照：
+    * `$FE/$FF` 的用途；
+    * `$C080,X` / `$C08x` soft-switch 存取是否對應到真機預期的 phase/step 行為。
+
+## 24. `goonies_probe` 續追 stepper：phase 有切換，但磁頭 quarter-track 仍卡在 92 (2026-03-14)
+* **本輪追加觀測**：
+  * 對 `$044D/$0450/$0457/$045D/$0460/$0467` 加入 stepper trace。
+  * 直接記錄：
+    * `qtr-track / track / byte index / data latch`
+    * `phases[0..3]`
+    * `$E5`, `$FE`, `$FF`
+* **關鍵新發現**：
+  * `$0457` 確實會碰 phase soft-switch，trace 看得到 phase pattern 變化。
+  * 但在 stuck 區段中：
+    * phase 多半只在 `0110` 與 `0010` 間活動；
+    * `current_qtr_track` 一直維持在 `92`；
+    * `current_track` 也固定在 `23`。
+  * 同時 `byte_index` 與 `data_latch` 仍持續更新，表示盤面旋轉還在跑，只是**磁頭位置沒有因這些 phase 操作而產生新的有效步進**。
+* **目前最合理的解讀**：
+  * loader 在 `$045D/$045F` 等待的，很可能就是某種步進後條件。
+  * 我們的 Disk II phase-to-quarter-track 模型雖然對一般 DOS boot 夠用，但在 `The Goonies` 這段 loader 的 phase 序列下，沒有產生它期待的磁頭移動語意。
+  * 這使得流程停留在 track 23 上反覆等待，即使旋轉本身正常。
+* **下一步方向**：
+  * 重新檢查 `disk2.rs` 的 `step_motor()` 規則，特別是多相位同時為 ON 時的目標 quarter-track 計算。
+  * 優先驗證方向：
+    * 真機/常見模擬器對 `0110 -> 0010`、`0010 -> 0110` 這類 phase 序列的 head movement 語意；
+    * 是否需要更貼近 latch/half-step 慣性的 stepper 模型，而不是目前的 target-snapping 寫法。
+
+## 25. 嘗試 canonical half-step `step_motor()`：`save_smoke` 不壞，但 `goonies` 仍未脫離 track 23 (2026-03-14)
+* **本輪實作**：
+  * 修改 `apple2-core/src/disk2.rs` 的 `step_motor()`：
+    * 改成 canonical 8-state half-step 模型。
+    * 單相位對應偶數 quarter-track，相鄰雙相位對應奇數 quarter-track。
+  * 新增 `apple2-core/src/disk2_test.rs` 單元測試：
+    * 驗證相鄰雙相位會落在 half-step。
+    * 驗證從雙相位退回單相位會回到偶數 quarter-track。
+* **驗證結果**：
+  * `cargo test -p apple2-core disk2_test -- --nocapture`：通過。
+  * `cargo run --quiet --bin save_smoke`：通過。
+  * `cargo run --quiet --bin goonies_probe`：`The Goonies` 仍卡在 track 23，未見明顯前進。
+* **本輪觀察**：
+  * 新模型本身沒有打壞目前 DOS 路徑。
+  * 但在目前 probe 抓到的 stuck 視窗中，stepper trace 仍主要看到 phase=`0010`，`qtr-track` 維持在 `92`。
+  * 也就是說，光把 `step_motor()` 從 snapping 改成 canonical half-step，還不足以解開這個 loader。
+* **目前結論**：
+  * `step_motor()` 的粗糙模型可能仍是問題的一部分，但不是唯一缺口，或至少不是目前最直接的卡點。
+  * 下一步不應只繼續盲調 stepper，而應回頭確認：
+    * `$0400` 一帶實際寫進 `$E5/X` 的 phase 序列；
+    * loader 是否還依賴其他尚未模擬的 Disk II ready/phase side effect。

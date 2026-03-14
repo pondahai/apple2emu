@@ -8,7 +8,7 @@ pub struct Disk2 {
     pub drive_select: u8,
     pub write_mode: bool,
     pub load_mode: bool,
-    pub current_track: usize, 
+    pub current_track: usize,
     pub tracks: Vec<TrackData>,
     pub is_disk_loaded: bool,
     pub phases: [bool; 4],
@@ -126,26 +126,45 @@ impl Disk2 {
     }
     
     fn step_motor(&mut self) {
+        let phase_mask =
+            (self.phases[0] as u8)
+            | ((self.phases[1] as u8) << 1)
+            | ((self.phases[2] as u8) << 2)
+            | ((self.phases[3] as u8) << 3);
+
+        // Canonical Disk II head positions across one 8-quarter-track cycle:
+        // single-coil states land on even positions, adjacent dual-coil states on odd positions.
+        let target_mod = match phase_mask {
+            0b0001 => Some(0),
+            0b0011 => Some(1),
+            0b0010 => Some(2),
+            0b0110 => Some(3),
+            0b0100 => Some(4),
+            0b1100 => Some(5),
+            0b1000 => Some(6),
+            0b1001 => Some(7),
+            _ => None,
+        };
+
+        let Some(target_mod) = target_mod else {
+            return;
+        };
+
+        let base = self.current_qtr_track.div_euclid(8) * 8;
+        let candidates = [base + target_mod, base + target_mod - 8, base + target_mod + 8];
         let mut target_qtr = self.current_qtr_track;
-        for p in 0..4 {
-            if self.phases[p] {
-                let p_pos = (p as i32) * 2;
-                let mut diff = p_pos - (target_qtr % 8);
-                if diff > 4 { diff -= 8; }
-                if diff < -4 { diff += 8; }
-                target_qtr += diff;
+        let mut best_diff = i32::MAX;
+
+        for candidate in candidates {
+            let diff = (candidate - self.current_qtr_track).abs();
+            if diff < best_diff {
+                best_diff = diff;
+                target_qtr = candidate;
             }
         }
 
-        if target_qtr != self.current_qtr_track {
-            self.current_qtr_track = target_qtr;
-            if self.current_qtr_track < 0 { self.current_qtr_track = 0; }
-            if self.current_qtr_track > 34 * 4 { self.current_qtr_track = 34 * 4; }
-            let nt = (self.current_qtr_track / 4) as usize;
-            if self.current_track != nt {
-                self.current_track = nt;
-            }
-        }
+        self.current_qtr_track = target_qtr.clamp(0, 34 * 4);
+        self.current_track = (self.current_qtr_track / 4) as usize;
     }
 
     pub fn tick(&mut self, cycles: u32) {

@@ -37,4 +37,31 @@ mod tests {
         disk.write_io(0xC0EF, 0x55); // Q7 write should not replace latch payload
         assert_eq!(disk.data_latch, 0xAA);
     }
+
+    #[test]
+    fn adjacent_dual_phase_state_lands_on_half_step() {
+        let mut disk = Disk2::new();
+        disk.current_qtr_track = 92;
+        disk.current_track = 23;
+
+        disk.write_io(0xC0E3, 0); // phase 1 on
+        disk.write_io(0xC0E5, 0); // phase 2 on
+
+        assert_eq!(disk.current_qtr_track, 91);
+        assert_eq!(disk.current_track, 22);
+    }
+
+    #[test]
+    fn dropping_to_single_phase_returns_to_even_quarter_track() {
+        let mut disk = Disk2::new();
+        disk.current_qtr_track = 91;
+        disk.current_track = 22;
+        disk.phases[1] = true;
+        disk.phases[2] = true;
+
+        disk.write_io(0xC0E2, 0); // phase 1 off, leave phase 2 on
+
+        assert_eq!(disk.current_qtr_track, 92);
+        assert_eq!(disk.current_track, 23);
+    }
 }
