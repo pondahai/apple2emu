@@ -681,3 +681,33 @@
     * 或 nibble/track 表示法本身不足以承載 `The Goonies` 所依賴的保護語意。
 * **處置**：
   * 本輪 head-hold 實驗碼已完整撤回，恢復乾淨基線。
+
+## 37. Desktop `auto turbo`：從 I/O 門檻版簡化為 `motor_on` 即無節流 (2026-03-14)
+* **動機**：
+  * `auto turbo` 的目標不是修正磁碟相容性，而是改善一般讀盤時的體感速度。
+  * 先前做過一版「依 Disk II I/O 密度觸發」的自動加速，但實務上還可以再更簡單、更直接。
+* **最終設計**：
+  * 不碰 `apple2-core` 的 cycle 語意。
+  * 只在 `apple2-desktop/src/main.rs` 的前端節流層做判斷：
+    * **只要 `disk2.motor_on == true`，就進入 `AUTO TURBO UNTHROTTLED`**
+    * **只要 `disk2.motor_on == false`，就回到 `F4` 的手動速度設定**
+  * 自動加速期間：
+    * `window.set_target_fps(0)`，也就是不做 FPS 節流。
+    * 視窗標題顯示 `AUTO TURBO UNTHROTTLED`。
+  * 手動速度模式仍保留：
+    * `F4` 依舊是 `1x -> 2x -> 3x -> 4x -> 5x -> 1x`
+    * 但只在磁碟馬達關閉時主導前端速度。
+* **取捨**：
+  * 優點：
+    * 邏輯非常簡單，容易預測。
+    * 不需要猜「哪些 PC 區間是磁碟程式」。
+    * 不需要維護 I/O 門檻或 hold-window。
+    * 不改 Disk II、CPU、音訊的核心 timing model。
+  * 缺點：
+    * 只要馬達開著，就會無節流，即使程式此刻不一定在密集讀盤。
+    * 這是刻意接受的簡化，因為目標本來就是桌面版讀盤加速，而不是更細緻的節流策略。
+* **驗證**：
+  * `cargo check -p apple2-desktop`：通過。
+  * `cargo test -p apple2-core disk2_test -- --nocapture`：通過。
+* **目前結論**：
+  * 這版 `auto turbo` 體感效果良好，可作為目前桌面版的預設磁碟加速策略。

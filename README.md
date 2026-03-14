@@ -49,6 +49,7 @@ This emulator is split into a workspace with two main crates:
 - Cycle-accurate rotational delays (~32 CPU cycles per byte) satisfying the tight timing loops of the DOS 3.3 RWTS routines.
 - Read sequencing and GCR (6-and-2 / 4-and-4) decoding capable of fully booting DOS 3.3 raw `.dsk` images into Applesoft BASIC.
 - Write sequencing now supports DOS `SAVE` flow (fixes `ERROR #8` in current in-memory disk model).
+- **Automatic Disk Turbo**: whenever the Disk II motor is spinning, the desktop frontend temporarily removes frame throttling to speed up disk reads and seeks; when the motor stops, speed returns to the current manual `F4` setting.
 - **Current limitation**: write results are applied to the in-memory nibble tracks only; persisting back to `.dsk` files (denibblize/save-back) is not implemented yet.
 - **Dynamic Disk Loading**: Press `F3` to open a file selection dialog. Supports standard `.dsk`, `.do`, `.po` images and Gzip compressed `.gz` images.
 
@@ -81,6 +82,7 @@ cargo run --bin apple2-desktop
 - **`Ctrl + Delete`**: **System Reset**. Simulates the physical `Reset` key on an Apple II (warm reset).
 - **`F3`**: **Load Disk Image**. Opens a system file dialog to choose a `.dsk` or `.gz` disk image.
 - **`F4`**: **Speed Cycle**. Cycles CPU speed through **1x → 2x → 3x → 4x → 5x → 1x** and relaxes frame/audio/debug overhead when above 1x.
+- **Disk Motor Auto Turbo**: While the Disk II motor is on, the window title shows **`AUTO TURBO UNTHROTTLED`** and the frontend runs unthrottled. When the motor stops, it falls back to the current `F4` speed mode.
 - **`Ctrl + V`**: **Paste Text**. Inject text from your host clipboard directly into the Apple II keyboard stream.
 - **Monitor**: To enter the Monitor manually from BASIC, type `CALL -151`.
 - **BASIC**: To enter AppleSoft BASIC from the Monitor (`*`), type `Ctrl+B` and press `Enter`.
