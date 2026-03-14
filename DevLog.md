@@ -295,3 +295,292 @@
   * 下一步不應只繼續盲調 stepper，而應回頭確認：
     * `$0400` 一帶實際寫進 `$E5/X` 的 phase 序列；
     * loader 是否還依賴其他尚未模擬的 Disk II ready/phase side effect。
+
+## 26. `$0400` phase 序列定稿：`$045D/$045F` 是 seek settle delay，不是 Disk II ready wait (2026-03-14)
+* **本輪重點**：
+  * 直接把 RAM `$0400` 例程反組譯並對照 `goonies_probe` trace。
+  * 釐清 `$E5`、`X`、`$C080,X` 與 `$028E` 的真正語意。
+* **關鍵解碼**：
+  * `$0400` 開頭的 `STX $E5 / STA $E4` 中：
+    * `$E5` 保存的是 Slot 6 Disk II 基底偏移 `#$60`；
+    * `$E4` 是 seek 目標值；
+    * `$028E` 不是單純 DOS track number，而是 **half-track index**。
+  * 因此 stuck 視窗中的：
+    * `$028E=$2E` 代表 half-track `46`，
+    * 對應 `quarter-track = 92`，
+    * 也就是實際 `track 23`。
+  * 這說明先前看到 `current_qtr_track=92` 並不是「明明 seek 了卻沒動」，而是剛好對上 loader 自己的目標編碼。
+* **`$C080,X` 真正的 phase 序列**：
+  * `$0430` 先 `SEC`，再 `JSR $044E`：
+    * `LDA $028E`
+    * `AND #$03`
+    * `ROL A`
+    * `ORA $E5`
+    * `TAX`
+    * `LDA $C080,X`
+  * 因為進入時 Carry=`1`，`ROL` 會產生 **奇數 offset**，所以這次 access 其實是：
+    * `$C0E1/$C0E3/$C0E5/$C0E7`
+    * 也就是 **phase ON**。
+  * 接著 `$043A` 走 `CLC` 後的 `JSR $0451`，Carry=`0`，所以第二次 access 會變成：
+    * `$C0E0/$C0E2/$C0E4/$C0E6`
+    * 也就是 **phase OFF**。
+  * 換句話說，`$0400` 這段 seek 的實際模式是：
+    * **先把新 half-track 對應的 phase 打開**
+    * **延遲**
+    * **再把舊 half-track 對應的 phase 關掉**
+    * **再延遲**
+* **stuck 視窗的具體例子**：
+  * 在最後一步進入 `track 23` 前，trace 顯示：
+    * 舊值 `$E1=$2D`，
+    * 新值 `$028E=$2E`，
+    * 最終 phase 由 `0110` 收斂到 `0010`。
+  * 對應的 soft-switch 序列就是：
+    * 新位置 `$2E` 經 `SEC+ROL` -> `X=$65` -> 讀 `$C0E5` -> **phase 2 ON**
+    * 舊位置 `$2D` 經 `CLC+ROL` -> `X=$62` -> 讀 `$C0E2` -> **phase 1 OFF**
+  * 這正好就是 canonical half-step 的 `0110 -> 0010`，並且 `quarter-track 91 -> 92`。
+  * 所以就 stuck 視窗來看，模擬器其實**已經做出了 loader 這一步 seek 所要求的 phase 轉換**。
+* **`$045D/$045F` 等待的是什麼**：
+  * `$045D` 的子程序內容只有：
+    * `LDX #$11`
+    * `DEX/BNE` busy loop
+    * `INC $FE`
+    * `INC $FF`（進位時）
+    * `SEC / SBC #$01 / BNE`
+  * 它**完全沒有讀任何 Disk II soft-switch**，也沒有碰 `$C08C/$C0EC`。
+  * 因此 `$045D/$045F` 等待的不是 data latch ready、不是 byte arrival，也不是某個即時 rotational condition。
+  * 它是在做 **固定時間的 seek settle delay**，同時把經過時間累加到 `$FE/$FF`。
+* **本輪結論修正**：
+  * 先前把 `$045D/$045F` 解讀成「等待某個 Disk II 條件成立」過於寬泛；更精確地說，它是在 **phase ON/OFF 之間與之後消耗時間，讓磁頭完成 half-step / settle**。
+  * 因此目前 `The Goonies` 的主卡點不再像是：
+    * 「`$0400` 沒有發出正確 phase 序列」，
+    * 或「`$045D/$045F` 少等了某個 ready bit」。
+  * 更合理的下一個焦點應該往後移到：
+    * seek 完成後的後續資料讀取窗口；
+    * `$051F/$0520` 一帶如何消費 `$FE/$FF` 累積的時間與 sector 流；
+    * 或 seek 完成後磁頭/旋轉對齊的更細緻副作用。
+
+## 27. `post_seek` trace：`$051F/$0520` 迴圈發生在 phases=`0000` 的全線圈 off 狀態 (2026-03-14)
+* **本輪追加觀測**：
+  * 擴充 `goonies_probe`，專抓 `$0500/$0512/$051F/$0520/$0524/$052A` 的 `postseek` trace。
+  * 追蹤：
+    * `$FE/$FF`
+    * `$05E4/$05EC/$05ED`
+    * `$0269/$026E/$028E`
+    * `byte_index/data_latch/qtr-track/phases`
+* **關鍵新發現**：
+  * 進入 `$0400` consumer 後，第一次命中 sector 2 時：
+    * `e7=02`, `e8=17`, `e9=FE`
+    * `028e=17`（half-track 23）
+    * `05ec=29`, `05ed=60`
+  * 在真正大量 hot 的 `$051F/$0520` 迴圈中，trace 穩定顯示：
+    * `phases=0000`
+    * `qtr=92`
+    * `track=23`
+    * `Y` 從 `$11` 倒數到 `00`
+    * `byte_index` 緩慢前進
+    * `data_latch` 跟著盤面轉動更新
+  * 每當 `Y` 倒數結束，流程會到 `$0520 -> $0522 -> $0524 -> $051D`，並讓：
+    * `$FE` 增加 1
+    * 然後再進下一輪 `Y` 倒數
+  * 也就是說 `$051F/$0520` 本身不是 stepper loop，也不是在等待某個 phase 轉換成立；它發生時四個 phase 線圈都已經關掉。
+* **目前最合理的解讀**：
+  * loader 在 `$0400` 已完成 seek 後，會進入一段 **all-phases-off 的 rotational waiting window**。
+  * 這段等待靠 CPU delay 與 `$FE/$FF` 計時，並讓磁碟繼續旋轉、byte index 自然前進。
+  * 因此如果相容性仍出問題，嫌疑點更像是：
+    * 真機在「全部 phase 關閉後」對磁頭保持/漂移/機械慣性的語意；
+    * 或 seek 完成後，讀取窗口相對於旋轉位置的對齊差異。
+* **本輪結論修正**：
+  * 問題不在 `$051F/$0520` 又偷偷發出錯誤 phase 序列；這段根本沒有再切 phase。
+  * 下一步應優先檢查：
+    * 我們在 phases 全關時是否過度理想化地把磁頭固定在 `qtr=92`；
+    * 以及 seek 結束後 `byte_index/data_latch` 是否缺少真機級的 step-settle side effect。
+
+## 28. `post_seek` 細 trace 補充：`$051F/$0520` 是純 CPU delay + rotational drift，`$0524` 只是在推進 `$FE` (2026-03-14)
+* **本輪追加觀測**：
+  * 用 `goonies_probe` 只篩 `postseek|path059x|entered 0400 consumer|final pc|pc hits`，降低 `$0380` 噪音。
+  * 觀察 sector `02` 命中後第一次進入 `$0400` consumer 的完整 seek 後窗口。
+* **關鍵新發現**：
+  * 在進入 `$051F/$0520` 之前，probe 先看到：
+    * `pc=0519 next=051B`
+    * `Y=$DF`
+    * `phases=0000`
+    * `idx=1805`
+  * 之後大量重複的熱點是：
+    * `051F -> 0520 -> 051F ...`
+    * `Y` 從 `$11` 一路倒數到 `00`
+    * `byte_index` 只在磁碟自然旋轉時慢慢前進
+    * `qtr=92`、`phases=0000` 全程不變
+  * 每次 `Y` 倒數到 `00` 時：
+    * `0520 -> 0522`
+    * 接著 `0524 -> 051D`
+    * 並讓 `$FE` 從 `$2C -> $2D -> $2E -> ...` 持續增加。
+  * 同時：
+    * `$05EC` 維持 `#$29`
+    * `$05ED` 維持 `#$60`
+    * `$0269` 維持 `#$02`
+    * 沒看到新的 phase soft-switch 活動。
+* **目前更精確的解讀**：
+  * `$051F/$0520` 是 seek 完之後的 **純 CPU delay loop**；
+  * 真正和磁碟互動的只剩「盤面繼續旋轉，`byte_index/data_latch` 自然更新」；
+  * `$0524` 則像是在把這段等待折算進 `$FE` 的 elapsed-time counter。
+* **本輪結論**：
+  * 如果 `The Goonies` 還是卡住，缺口更像不是「phase 序列不對」，而是：
+    * seek 完後開始觀察盤面的時間點不對；
+    * 或 head move 完成瞬間，真機會留下某種我們目前沒有模擬的對齊/settle side effect。
+  * 下一輪適合做的實驗，不是再亂改 `$051F/$0520`，而是：
+    * 檢查 phase 切換完成瞬間是否要延後生效到新 track；
+    * 或在 head step 完成後，對 `byte_index/data_latch` 注入更接近真機的 settle 語意。
+
+## 29. 最小 `step settle` 實驗：DOS 不壞，但 `goonies` trace 幾乎不變 (2026-03-14)
+* **本輪實作**：
+  * 在 `apple2-core/src/disk2.rs` 加入最小版 `step settle` 視窗：
+    * 當 `step_motor()` 跨越 track 邊界時，先記住 `settle_track`。
+    * 接下來固定 `128` cycles 內，`tick()` 讀寫仍暫時使用舊 track。
+  * 新增 `apple2-core/src/disk2_test.rs` 測試：
+    * 驗證 cross-track step 後，短暫 settle window 內仍先讀到舊 track，之後才切到新 track。
+* **驗證結果**：
+  * `cargo test -p apple2-core disk2_test -- --nocapture`：通過。
+  * `cargo run --quiet --bin save_smoke`：通過。
+  * `cargo run --quiet --bin goonies_probe`：關鍵 trace 幾乎與前一輪相同。
+* **觀察**：
+  * `goonies_probe` 仍然：
+    * 命中 sector `02 / 04 / 06` 後回到 `ret=059A`
+    * 進入 `$0400` consumer
+    * 最後長時間卡在 `$051F/$0520`
+  * `postseek` trace 仍顯示：
+    * `phases=0000`
+    * `qtr=92`
+    * `$05EC=29`, `$05ED=60`
+    * `pc hits: 045F=144364 0460=144364 051F=324685 0520=324684`
+  * 也就是說，這個「跨 track 後短暫沿用舊 track」模型雖然合理，也不會破壞 DOS，但**沒有實質改變 `The Goonies` 的卡點形態**。
+* **目前結論**：
+  * 問題不像是單純「step 完後前幾十/百 cycles 還在讀舊 track」。
+  * 更值得懷疑的缺口改為：
+    * quarter-track/half-track 對應到實體磁訊號時，是否需要更細緻的 cross-track bleed / analog overlap；
+    * 或 loader 實際依賴的是 step 之後的 rotational alignment，而不是短暫 track selection 延遲本身。
+
+## 30. 最小 read-only cross-track overlap：`goonies` 有明顯位移，但 DOS 路徑立即退化，已撤回 (2026-03-14)
+* **本輪實作**：
+  * 在 `apple2-core/src/disk2.rs` 只對 `Q7=0,Q6=0` 讀模式加上保守版 cross-track overlap：
+    * 僅在 `current_qtr_track` 靠近 track 邊界時啟用；
+    * 交錯混入鄰近 track 的 byte。
+  * 補了單元測試，驗證：
+    * 邊界位置會混入前一軌資料；
+    * 非邊界位置仍只讀本軌。
+* **觀察**：
+  * `goonies_probe` 的行為確實出現了**本質位移**：
+    * 不再落回原本大量的 `$051F/$0520` waiting window；
+    * `pc hits` 變成 `051F=0, 0520=0`；
+    * `final pc` 甚至跑到 `FA50`。
+  * 但這個改動同時**立即打壞 DOS 基線**：
+    * `save_smoke` 畫面退化到 monitor / 錯亂狀態；
+    * `Tracks changed after SAVE flow` 變成 `0`，和正常基線不符。
+* **結論**：
+  * 這證明 `The Goonies` 的 loader 對「跨軌類比重疊」這一類語意**非常敏感**；
+  * 也證明如果直接把 overlap 粗暴地套進一般讀路徑，會立刻破壞正常 DOS 3.3 啟動/讀寫。
+* **處置**：
+  * overlap 實驗碼已**完整撤回**，恢復穩定基線。
+  * `cargo test -p apple2-core disk2_test -- --nocapture`：恢復通過。
+  * `cargo run --quiet --bin save_smoke`：恢復通過。
+* **下一步建議**：
+  * 若要走 overlap 方向，不能做成全域常態讀取規則；
+  * 更合理的是設計成：
+    * 只在特定 quarter-track / phase-off seek 後窗口啟用；
+    * 或更接近真機的弱耦合/低比例混合，而不是交錯 byte 級替換。
+
+## 31. 超局部 post-seek shadow read：DOS 基線維持，但 `goonies` 幾乎完全不動，已撤回 (2026-03-14)
+* **本輪實作**：
+  * 在 `apple2-core/src/machine.rs` 先用極窄條件鎖定 `goonies` 的 post-seek 視窗：
+    * `pc` 只限 `$051D/$051F/$0520/$0522/$0524`
+    * `phases=0000`
+    * `current_qtr_track` 限在 `92` 附近
+    * RAM signature 另外鎖 `0269=02`, `05EC=29`, `05ED=60`
+  * 只有命中這個視窗時，才通知 `apple2-core/src/disk2.rs` 啟用弱 shadow read。
+  * shadow source 只取「最近一次跨軌前的舊 track」，並只做很弱的偏向：
+    * 優先保留本軌 byte；
+    * 僅在少數位置或 shadow byte 帶高位時才偏向舊軌。
+* **驗證結果**：
+  * `cargo test -p apple2-core disk2_test -- --nocapture`：通過。
+  * `cargo run --quiet --bin save_smoke`：仍通過，`Tracks changed after SAVE flow: 2`，顯示 DOS 基線沒被打壞。
+  * `cargo run --quiet --bin goonies_probe`：沒有看到前一輪全域 overlap 那種本質位移。
+* **觀察**：
+  * `goonies_probe` 仍然進入 `entered 0400 consumer`，之後長時間停在同一組 post-seek 視窗。
+  * `final pc` 仍是 `051F`。
+  * `pc hits` 仍是：
+    * `045F=144364`
+    * `0460=144364`
+    * `051F=324685`
+    * `0520=324684`
+  * 也就是說，這個「只在 `$051F/$0520` 等待窗內做弱 shadow」版本，雖然足夠局部、不會傷 DOS，但對 loader 的控制流幾乎沒有實際影響。
+* **結論**：
+  * overlap 方向本身仍成立，但有效訊號顯然不是「只在卡住之後的 phase-off waiting loop 內輕量混入舊軌 byte」。
+  * 真正敏感的點更可能發生在：
+    * 更早的 seek 完成瞬間；
+    * step/settle 到 read window 的交界；
+    * 或需要比「弱 byte 級偏向」更接近類比磁頭耦合的模型。
+* **處置**：
+  * 這組超局部 shadow read 實驗碼已完整撤回，恢復乾淨基線。
+
+## 32. `step_motor()` 跨軌後前 4 byte 弱 shadow：仍無位移，已撤回 (2026-03-14)
+* **本輪實作**：
+  * 將 overlap/shadow 的實驗點前移到真正的 seek-to-read 交界：
+    * `apple2-core/src/machine.rs` 只在 `goonies` 的 `$0400` consumer / seek 路徑附近 arm 實驗。
+    * `apple2-core/src/disk2.rs` 在 `step_motor()` 真正跨軌時，記住舊 track，並開一個只有 `4` 個 read byte 的短 window。
+  * 讀取規則維持非常保守：
+    * 預設仍以新軌 byte 為主；
+    * 只有當舊軌 byte 看起來像 sync/prologue（例如 `>= $D5`），或高位條件特別明顯時，才短暫偏向舊軌。
+* **驗證結果**：
+  * `cargo test -p apple2-core disk2_test -- --nocapture`：通過。
+  * `cargo run --quiet --bin save_smoke`：通過，DOS 基線未受影響。
+  * `cargo run --quiet --bin goonies_probe | rg "entered 0400 consumer|path059x|final pc|pc hits"`：仍與前一輪基線相同。
+* **觀察**：
+  * `goonies` 仍會：
+    * 命中 `sector 02 / 04 / 06`
+    * 進入 `entered 0400 consumer`
+    * 最後回到原本的 stuck 形態
+  * 關鍵結果沒有位移：
+    * `final pc=051F`
+    * `pc hits: 045F=144364 0460=144364 051F=324685 0520=324684`
+* **結論**：
+  * 敏感點看來也不是「跨軌後頭 4 個 byte 的弱 sync/prologue 偏置」。
+  * 換句話說，問題不像是簡單的：
+    * post-seek wait-loop shadow；
+    * 或 post-step 前幾 byte shadow。
+  * 更值得懷疑的缺口可能要再往下探到：
+    * rotational alignment 在 seek 完成瞬間的重定位；
+    * `byte_index`/phase 關閉時機與真機的對齊差；
+    * 或 quarter-track 對磁訊號的取樣位置，而不是 byte 值混合本身。
+* **處置**：
+  * 實驗碼已完整撤回，恢復乾淨基線。
+
+## 33. 今日總結：方向正確，但 byte-level overlap 不是正確抽象層 (2026-03-14)
+* **今日最重要的正負訊號**：
+  * 全域 read-only cross-track overlap 會明顯改變 `The Goonies` 行為，甚至把 loader 從原本的 `$051F/$0520` 卡點推走。
+  * 但這種做法會立刻打壞 DOS 基線與 `save_smoke`，因此不能作為一般 Disk II 讀取規則。
+  * 相反地，任何「太晚、太弱、太局部」的 shadow/overlap 版本，雖然不會破壞 DOS，卻幾乎無法推動 `goonies`。
+* **本日結論**：
+  * 大方向仍然是對的：
+    * 問題確實和 seek 後的類比/跨軌/取樣語意有關；
+    * `goonies` 很可能依賴某種真機級的 head coupling / mechanical settling / rotational alignment 副作用。
+  * 但目前已高度懷疑：
+    * 「直接混 byte 值」不是正確抽象層；
+    * 有效訊號更可能在 seek 完成瞬間的取樣位置或對齊，而不是讀到哪個 byte 值。
+* **已證偽或應下修優先度的方向**：
+  * `$051F/$0520` waiting loop 本身不是主因。
+  * 單純的 seek settle delay 長短不是主因。
+  * post-seek waiting window 的弱 shadow 沒有效果。
+  * `step_motor()` 跨軌後前幾個 byte 的弱 shadow 也沒有效果。
+* **目前最值得優先嘗試的下一步**：
+  1. **`byte_index` / rotational alignment 重定位實驗**
+     * 在跨軌完成瞬間，不混 byte，而是對 `byte_index` 做很小的偏移。
+     * 先只在 `goonies` 的 `$0400` seek 路徑、`qtr≈92`、相關 phase transition 後測 `+1/+2/+4/+8` byte。
+  2. **phase-off 的短暫 head bias / hold 語意**
+     * 檢查 `phases=0000` 後是否仍應保留短暫的 last-step 偏置，而不是把磁頭理想化地完全固定。
+  3. **quarter-track 取樣位置模型**
+     * 若前兩者仍無效，下一層才是探討 quarter-track 如何影響實際 bitstream / byte phase 的取樣位置，而不是繼續做 byte 級混合。
+* **實務建議**：
+  * 後續實驗應優先維持乾淨 DOS 基線，避免再引入全域 overlap 規則。
+  * 每輪都應同時驗證：
+    * `cargo test -p apple2-core disk2_test -- --nocapture`
+    * `cargo run --quiet --bin save_smoke`
+    * `cargo run --quiet --bin goonies_probe`
