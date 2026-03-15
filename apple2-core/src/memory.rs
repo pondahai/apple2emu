@@ -140,6 +140,10 @@ impl Apple2Memory {
         self.pushbuttons[1] = button1;
     }
 
+    fn canonical_lc_switch(addr: u16) -> u16 {
+        0xC080 | ((addr - 0xC080) & 0x000B)
+    }
+
     fn record_bus_access_cycle(&mut self) -> Option<u64> {
         if !self.cpu_step_audio_active {
             return None;
@@ -213,15 +217,16 @@ impl Memory for Apple2Memory {
                         let bank2 = (addr & 0x08) == 0;
                         let read_ram = (addr & 0x03) == 0x00 || (addr & 0x03) == 0x03;
                         let is_write_en_switch = (addr & 0x01) != 0;
+                        let canonical = Self::canonical_lc_switch(addr);
 
                         self.lc_bank2 = bank2;
                         self.lc_read_enable = read_ram;
 
                         if is_write_en_switch {
-                            if self.lc_pre_write_switch == addr {
+                            if self.lc_pre_write_switch == canonical {
                                 self.lc_write_enable = true;
                             }
-                            self.lc_pre_write_switch = addr;
+                            self.lc_pre_write_switch = canonical;
                             clear_pre_write = false;
                         } else {
                             self.lc_write_enable = false;
