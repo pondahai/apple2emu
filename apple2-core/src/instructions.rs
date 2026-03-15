@@ -66,6 +66,11 @@ impl CPU {
     }
 
     pub(crate) fn adc_with_val(&mut self, value: u8) {
+        if self.status.d {
+            self.adc_decimal(value);
+            return;
+        }
+
         let sum = self.a as u16 + value as u16 + (if self.status.c { 1 } else { 0 });
         self.status.c = sum > 0xFF;
         let result = sum as u8;
@@ -76,12 +81,12 @@ impl CPU {
 
     pub(crate) fn sbc<M: Memory>(&mut self, mem: &mut M, mode: AddressingMode) {
         let value = self.read_operand(mem, mode);
-        self.adc_with_val(!value);
+        self.sbc_with_val(value);
     }
 
     pub(crate) fn sbc_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {
         let value = mem.read(addr);
-        self.adc_with_val(!value);
+        self.sbc_with_val(value);
     }
 
     // --- Logical ---
@@ -386,5 +391,63 @@ impl CPU {
         self.status.from_byte(p);
         self.status.b = false; // B flag is always false inside CPU (Bug 2)
         self.status.u = true; // U flag always 1
+    }
+
+    fn sbc_with_val(&mut self, value: u8) {
+        if self.status.d {
+            self.sbc_decimal(value);
+        } else {
+            self.adc_with_val(!value);
+        }
+    }
+
+    fn adc_decimal(&mut self, value: u8) {
+        let carry_in = if self.status.c { 1 } else { 0 };
+        let a = self.a;
+        let sum = a as u16 + value as u16 + carry_in as u16;
+        let binary_result = sum as u8;
+
+        self.status.v = (a ^ binary_result) & (value ^ binary_result) & 0x80 != 0;
+
+        let mut lo = (a & 0x0F) + (value & 0x0F) + carry_in;
+        let mut carry_hi = 0;
+        if lo > 9 {
+            lo = lo.wrapping_add(6);
+            carry_hi = 1;
+        }
+
+        let mut hi = (a >> 4) + (value >> 4) + carry_hi;
+        self.status.c = hi > 9;
+        if hi > 9 {
+            hi = hi.wrapping_add(6);
+        }
+
+        self.a = (hi << 4) | (lo & 0x0F);
+        self.update_zero_and_negative_flags(self.a);
+    }
+
+    fn sbc_decimal(&mut self, value: u8) {
+        let carry_in = if self.status.c { 1 } else { 0 };
+        let a = self.a;
+        let diff = a as i16 - value as i16 - (1 - carry_in) as i16;
+        let binary_result = diff as u8;
+
+        self.status.v = ((a ^ value) & (a ^ binary_result) & 0x80) != 0;
+
+        let mut lo = (a & 0x0F) as i16 - (value & 0x0F) as i16 - (1 - carry_in) as i16;
+        let mut borrow_hi = 0;
+        if lo < 0 {
+            lo -= 6;
+            borrow_hi = 1;
+        }
+
+        let mut hi = (a >> 4) as i16 - (value >> 4) as i16 - borrow_hi;
+        self.status.c = diff >= 0;
+        if hi < 0 {
+            hi -= 6;
+        }
+
+        self.a = (((hi as u8) << 4) & 0xF0) | ((lo as u8) & 0x0F);
+        self.update_zero_and_negative_flags(self.a);
     }
 }

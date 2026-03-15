@@ -319,6 +319,9 @@ fn main() {
     let sample_rate: u32 = 44_100;
     let cycles_per_sample = 1_023_000.0_f64 / sample_rate as f64;
     update_window_title(&mut window, speed_multiplier, false);
+    let mut current_target_fps: usize = 60;
+    let mut last_title_speed_multiplier = speed_multiplier;
+    let mut last_title_auto_disk_turbo = false;
 
     while window.is_open() && !window.is_key_down(Key::F10) {
         // Handle Input
@@ -341,8 +344,8 @@ fn main() {
             window.is_key_down(Key::Down),
         );
         let (left_alt_down, right_alt_down) = alt_buttons();
-        let joystick_button_0 = left_alt_down || window.is_key_down(Key::LeftAlt);
-        let joystick_button_1 = right_alt_down || window.is_key_down(Key::RightAlt);
+        let joystick_button_0 = right_alt_down || window.is_key_down(Key::RightAlt);
+        let joystick_button_1 = left_alt_down || window.is_key_down(Key::LeftAlt);
         machine
             .mem
             .set_joystick_state(joystick_x, joystick_y, joystick_button_0, joystick_button_1);
@@ -662,7 +665,6 @@ fn main() {
                 _ => 0,
             };
             if ascii != 0 {
-                println!("Key Pressed: {:?} -> ASCII {:02X}", key, ascii);
                 key_queue.push_back(ascii);
             }
         }
@@ -733,9 +735,12 @@ fn main() {
                 speed_multiplier + 1
             };
             let turbo_mode = speed_multiplier > 1;
-            window.set_target_fps(if turbo_mode { 120 } else { 60 });
+            let desired_fps = if turbo_mode { 120 } else { 60 };
+            if current_target_fps != desired_fps {
+                window.set_target_fps(desired_fps);
+                current_target_fps = desired_fps;
+            }
             println!(">>> Speed Mode: CPU x{}", speed_multiplier);
-            update_window_title(&mut window, speed_multiplier, machine.mem.disk2.motor_on);
         }
         last_f4_down = f4_down;
 
@@ -755,14 +760,24 @@ fn main() {
             speed_multiplier
         };
         let turbo_mode = auto_disk_turbo_active || effective_speed_multiplier > 1;
-        window.set_target_fps(if auto_disk_turbo_active {
+        let desired_fps = if auto_disk_turbo_active {
             0
         } else if turbo_mode {
             120
         } else {
             60
-        });
-        update_window_title(&mut window, speed_multiplier, auto_disk_turbo_active);
+        };
+        if current_target_fps != desired_fps {
+            window.set_target_fps(desired_fps);
+            current_target_fps = desired_fps;
+        }
+        if last_title_speed_multiplier != speed_multiplier
+            || last_title_auto_disk_turbo != auto_disk_turbo_active
+        {
+            update_window_title(&mut window, speed_multiplier, auto_disk_turbo_active);
+            last_title_speed_multiplier = speed_multiplier;
+            last_title_auto_disk_turbo = auto_disk_turbo_active;
+        }
         let target_cycles = if auto_disk_turbo_active {
             BASE_FRAME_CYCLES * MAX_SPEED_MULTIPLIER
         } else {

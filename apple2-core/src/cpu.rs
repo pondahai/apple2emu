@@ -59,6 +59,7 @@ pub struct CPU {
     pub pc: u16,             // Program Counter
     pub sp: u8,              // Stack Pointer
     pub status: StatusFlags, // P Register (Processor Status)
+    pub jammed: bool,        // NMOS KIL/JAM state
 }
 
 impl CPU {
@@ -70,6 +71,7 @@ impl CPU {
             pc: 0,
             sp: 0xFD,
             status: StatusFlags::default(),
+            jammed: false,
         }
     }
 
@@ -79,6 +81,7 @@ impl CPU {
         self.y = 0;
         self.sp = 0xFD;
         self.status = StatusFlags::default();
+        self.jammed = false;
         // Load Reset Vector from $FFFC / $FFFD
         self.pc = mem.read_word(0xFFFC);
     }
@@ -162,6 +165,12 @@ impl CPU {
 
     /// Step one instruction
     pub fn step<M: Memory>(&mut self, mem: &mut M) -> u32 {
+        if self.jammed {
+            // KIL/JAM halts the NMOS 6502 until reset. Keep returning a
+            // non-zero cycle count so the emulator does not spin forever.
+            return 1;
+        }
+
         let opcode = self.fetch_byte(mem);
         let mut extra_cycles = 0;
 
@@ -454,7 +463,7 @@ impl CPU {
             }
 
             // Math: SBC
-            0xE9 => {
+            0xE9 | 0xEB => {
                 self.sbc(mem, AddressingMode::Immediate);
                 2
             }
@@ -960,20 +969,52 @@ impl CPU {
             // Indexed 2-byte NOPs (Zero Page,X)
             0x14 | 0x34 | 0x54 | 0x74 | 0xD4 | 0xF4 => {
                 let b = self.fetch_byte(mem);
+                mem.read(b as u16);
                 mem.read(b.wrapping_add(self.x) as u16);
                 4
             }
             // Indexed 3-byte NOPs (Absolute,X)
             0x1C | 0x3C | 0x5C | 0x7C | 0xDC | 0xFC => {
                 let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteX);
-                mem.read(addr);
+                let wrong_page = (addr.wrapping_sub(self.x as u16) & 0xFF00)
+                    | ((addr as u8).wrapping_sub(self.x).wrapping_add(self.x) as u16);
+                mem.read(wrong_page);
                 if p {
+                    mem.read(addr);
                     extra_cycles += 1;
                 }
                 4
             }
             // 1-byte variants
             0x1A | 0x3A | 0x5A | 0x7A | 0xDA | 0xFA => 2,
+
+            // ANC (Illegal: AND then move N into C)
+            0x0B | 0x2B => {
+                let val = self.fetch_byte(mem);
+                self.anc_with_val(val);
+                2
+            }
+
+            // ALR (Illegal: AND then LSR A)
+            0x4B => {
+                let val = self.fetch_byte(mem);
+                self.alr_with_val(val);
+                2
+            }
+
+            // ARR (Illegal: AND then ROR A)
+            0x6B => {
+                let val = self.fetch_byte(mem);
+                self.arr_with_val(val);
+                2
+            }
+
+            // SBX / AXS (Illegal: (A & X) - imm -> X)
+            0xCB => {
+                let val = self.fetch_byte(mem);
+                self.axs_with_val(val);
+                2
+            }
 
             // LAX (Illegal: Load A and X)
             0xAF => {
@@ -1037,6 +1078,25 @@ impl CPU {
                 self.update_zero_and_negative_flags(val);
                 2
             } // LAX #imm
+            0xBB => {
+                let (addr, p) = self.get_operand_address(mem, AddressingMode::AbsoluteY);
+                let val = mem.read(addr) & self.sp;
+                self.a = val;
+                self.x = val;
+                self.sp = val;
+                self.update_zero_and_negative_flags(val);
+                if p {
+                    extra_cycles += 1;
+                }
+                4
+            } // LAS abs,Y
+
+            // XAA / ANE (Illegal, unstable on real NMOS 6502)
+            0x8B => {
+                let val = self.fetch_byte(mem);
+                self.xaa_with_val(val);
+                2
+            }
 
             // SAX (Illegal: Store A AND X)
             0x8F => {
@@ -1058,6 +1118,41 @@ impl CPU {
                 let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectX);
                 mem.write(addr, self.a & self.x);
                 6
+            }
+
+            // SHA / AHX (Illegal, unstable on real NMOS 6502)
+            0x9F => {
+                let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteY);
+                self.ahx_store(mem, addr, self.a & self.x);
+                5
+            }
+            0x93 => {
+                let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectY);
+                self.ahx_store(mem, addr, self.a & self.x);
+                6
+            }
+
+            // TAS / SHS (Illegal, unstable on real NMOS 6502)
+            0x9B => {
+                let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteY);
+                let val = self.a & self.x;
+                self.sp = val;
+                self.ahx_store(mem, addr, val);
+                5
+            }
+
+            // SHY / SYA (Illegal, unstable on real NMOS 6502)
+            0x9C => {
+                let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteX);
+                self.h_plus_one_store(mem, addr, self.y);
+                5
+            }
+
+            // SHX / SXA (Illegal, unstable on real NMOS 6502)
+            0x9E => {
+                let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteY);
+                self.h_plus_one_store(mem, addr, self.x);
+                5
             }
 
             // DCP (Illegal: DEC then CMP)
@@ -1282,9 +1377,63 @@ impl CPU {
                 8
             }
 
-            _ => 2,
+            // KIL / JAM (Illegal: halt until reset)
+            0x02 | 0x12 | 0x22 | 0x32 | 0x42 | 0x52 | 0x62 | 0x72 | 0x92 | 0xB2
+            | 0xD2 | 0xF2 => {
+                self.jammed = true;
+                self.pc = self.pc.wrapping_sub(1);
+                1
+            }
         };
         cycles + extra_cycles
+    }
+
+    fn anc_with_val(&mut self, value: u8) {
+        self.a &= value;
+        self.update_zero_and_negative_flags(self.a);
+        self.status.c = self.status.n;
+    }
+
+    fn alr_with_val(&mut self, value: u8) {
+        self.a &= value;
+        self.status.c = (self.a & 0x01) != 0;
+        self.a >>= 1;
+        self.update_zero_and_negative_flags(self.a);
+    }
+
+    fn arr_with_val(&mut self, value: u8) {
+        self.a &= value;
+        let old_c = self.status.c;
+        self.a = (self.a >> 1) | (if old_c { 0x80 } else { 0 });
+        self.update_zero_and_negative_flags(self.a);
+        self.status.c = (self.a & 0x40) != 0;
+        self.status.v = ((self.a >> 6) ^ (self.a >> 5)) & 0x01 != 0;
+    }
+
+    fn axs_with_val(&mut self, value: u8) {
+        let anded = self.a & self.x;
+        self.status.c = anded >= value;
+        self.x = anded.wrapping_sub(value);
+        self.update_zero_and_negative_flags(self.x);
+    }
+
+    fn xaa_with_val(&mut self, value: u8) {
+        // XAA is hardware-unstable; use the common emulator approximation with
+        // a fixed "magic constant" to keep behavior deterministic.
+        self.a = (self.a | 0xEE) & self.x & value;
+        self.update_zero_and_negative_flags(self.a);
+    }
+
+    fn h_plus_one_mask(addr: u16) -> u8 {
+        (((addr >> 8) as u8).wrapping_add(1)) as u8
+    }
+
+    fn h_plus_one_store<M: Memory>(&mut self, mem: &mut M, addr: u16, value: u8) {
+        mem.write(addr, value & Self::h_plus_one_mask(addr));
+    }
+
+    fn ahx_store<M: Memory>(&mut self, mem: &mut M, addr: u16, value: u8) {
+        self.h_plus_one_store(mem, addr, value);
     }
 
     fn dcp_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {

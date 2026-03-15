@@ -766,3 +766,34 @@
     * 某些遊戲中右/下方向仍可能有相容性問題，這部分尚未修。
 * **提交**：
   * `9ce6a27` `Add joystick emulation with Alt button support`
+
+## 40. CPU undocumented opcode 擴充與輸入反應修正 (2026-03-15)
+* **CPU undocumented opcode coverage 補齊**：
+  * 在 `apple2-core/src/cpu.rs` 補上 `ANC`, `ALR`, `ARR`, `AXS/SBX`, `LAS`, `XAA`, `AHX`, `TAS`, `SHY`, `SHX`, `KIL/JAM` 與 `0xEB` (`SBC #imm` unofficial alias)。
+  * 將 opcode table 補到 **256/256**，並為 `KIL/JAM` 加入明確的 jammed/halt 狀態。
+* **Decimal mode 補全**：
+  * 在 `apple2-core/src/instructions.rs` 為 `ADC/SBC` 補上 NMOS 6502 的 BCD arithmetic 路徑。
+* **非法 NOP / IGN bus 行為修正**：
+  * 補齊 `ZeroPage,X` 與 `Absolute,X` 類 undocumented NOP 的 dummy read / wrong-page read。
+  * 這對 Apple II 的 memory-mapped I/O side effects 尤其重要。
+* **測試**：
+  * `apple2-core/src/cpu_test.rs` 新增對 undocumented opcodes、decimal mode、jam state、與 NOP dummy reads 的回歸測試。
+  * `cargo test -p apple2-core` 通過。
+* **目前定性**：
+  * `SLO/RLA/SRE/RRA/LAX/SAX/DCP/ISC/NOP/KIL/ANC/ALR/ARR/AXS/EB` 已達到高完整度。
+  * `XAA/LAX #imm/AHX/SHX/SHY/TAS` 仍屬於工程上可用的近似模型，不宜宣稱為完全真機級。
+
+## 41. 鍵盤反應遲滯與搖桿 Alt 對應微調 (2026-03-15)
+* **問題現象**：
+  * 加入 Windows `Alt` 搖桿按鈕支援後，一般鍵盤輸入體感變慢。
+* **根因方向**：
+  * 主迴圈在每次按鍵時都 `println!` 到 console，且每幀都重複呼叫 `set_target_fps()` 與 `set_title()`，導致前端互動路徑多了不必要的同步開銷。
+* **修正**：
+  * 移除每個按鍵事件的 console log。
+  * 將 `window.set_target_fps()` 與 `update_window_title()` 改為只在狀態變化時更新。
+  * 依使用需求，將桌面版搖桿按鈕映射調整為：
+    * `Right Alt -> Pushbutton 0`
+    * `Left Alt -> Pushbutton 1`
+* **驗證**：
+  * `cargo check -p apple2-desktop` 通過。
+  * 實機回報：鍵盤反應已改善。
