@@ -18,7 +18,8 @@
     * 將記憶體中的磁軌資料 (Nibble) 反解碼回 `.dsk` 格式並存檔。
 * [ ] **非法指令與 NMOS 6502 相容性深度補全**
     * `$0BB8` 附近的 DOS Stage 2 / RWTS 崩潰點已由 `SKB/SKW` dummy read 修正解除。
-    * opcode coverage 與 decimal mode 已補齊；目前剩餘工作聚焦於 unstable undocumented opcodes 的真機近似度，以及更細的 bus/flag/timing 相容性。
+    * opcode coverage、decimal mode、與 undocumented NOP dummy reads 已補齊。
+    * 目前剩餘工作聚焦於 unstable undocumented opcodes (`XAA/LAX#imm/AHX/SHX/SHY/TAS`) 的真機近似度，以及更細的 bus/flag/timing 相容性。
 
 
 ## 已知問題備忘

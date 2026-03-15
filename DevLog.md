@@ -797,3 +797,16 @@
 * **驗證**：
   * `cargo check -p apple2-desktop` 通過。
   * 實機回報：鍵盤反應已改善。
+
+## 42. undocumented store opcode 跨頁行為再逼近真機 (2026-03-15)
+* **目標**：
+  * 針對 `AHX`, `SHX`, `SHY`, `TAS` 這批 `H+1` family 的 page-cross 行為，把先前「只寫到 final effective address」的簡化模型往真機再推近一步。
+* **修正**：
+  * 在 `apple2-core/src/cpu.rs` 中，這批 opcode 現在會：
+    * 以 base address 的高位元組計算 `H+1` mask；
+    * 若發生 page crossing，寫入位址的高位元組改由 stored value 決定，而不再固定寫到 final effective address。
+* **測試**：
+  * `apple2-core/src/cpu_test.rs` 新增 `AHX/SHX/SHY/TAS` 的 page-cross 回歸測試。
+  * `cargo test -p apple2-core` 通過。
+* **目前定性**：
+  * 這比前一版更接近已知 NMOS 6502 行為，但仍屬於高可信近似，不宜宣稱為已與所有晶片批次完全一致。

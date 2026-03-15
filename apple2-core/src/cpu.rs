@@ -1122,36 +1122,36 @@ impl CPU {
 
             // SHA / AHX (Illegal, unstable on real NMOS 6502)
             0x9F => {
-                let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteY);
-                self.ahx_store(mem, addr, self.a & self.x);
+                let (base, addr, page_crossed) = self.h_plus_one_absolute_y(mem);
+                self.ahx_store(mem, base, addr, self.a & self.x, page_crossed);
                 5
             }
             0x93 => {
-                let (addr, _) = self.get_operand_address(mem, AddressingMode::IndirectY);
-                self.ahx_store(mem, addr, self.a & self.x);
+                let (base, addr, page_crossed) = self.h_plus_one_indirect_y(mem);
+                self.ahx_store(mem, base, addr, self.a & self.x, page_crossed);
                 6
             }
 
             // TAS / SHS (Illegal, unstable on real NMOS 6502)
             0x9B => {
-                let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteY);
+                let (base, addr, page_crossed) = self.h_plus_one_absolute_y(mem);
                 let val = self.a & self.x;
                 self.sp = val;
-                self.ahx_store(mem, addr, val);
+                self.ahx_store(mem, base, addr, val, page_crossed);
                 5
             }
 
             // SHY / SYA (Illegal, unstable on real NMOS 6502)
             0x9C => {
-                let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteX);
-                self.h_plus_one_store(mem, addr, self.y);
+                let (base, addr, page_crossed) = self.h_plus_one_absolute_x(mem);
+                self.h_plus_one_store(mem, base, addr, self.y, page_crossed);
                 5
             }
 
             // SHX / SXA (Illegal, unstable on real NMOS 6502)
             0x9E => {
-                let (addr, _) = self.get_operand_address(mem, AddressingMode::AbsoluteY);
-                self.h_plus_one_store(mem, addr, self.x);
+                let (base, addr, page_crossed) = self.h_plus_one_absolute_y(mem);
+                self.h_plus_one_store(mem, base, addr, self.x, page_crossed);
                 5
             }
 
@@ -1424,16 +1424,61 @@ impl CPU {
         self.update_zero_and_negative_flags(self.a);
     }
 
-    fn h_plus_one_mask(addr: u16) -> u8 {
-        (((addr >> 8) as u8).wrapping_add(1)) as u8
+    fn h_plus_one_absolute_x<M: Memory>(&mut self, mem: &mut M) -> (u16, u16, bool) {
+        let base = self.fetch_word(mem);
+        let addr = base.wrapping_add(self.x as u16);
+        (base, addr, (base & 0xFF00) != (addr & 0xFF00))
     }
 
-    fn h_plus_one_store<M: Memory>(&mut self, mem: &mut M, addr: u16, value: u8) {
-        mem.write(addr, value & Self::h_plus_one_mask(addr));
+    fn h_plus_one_absolute_y<M: Memory>(&mut self, mem: &mut M) -> (u16, u16, bool) {
+        let base = self.fetch_word(mem);
+        let addr = base.wrapping_add(self.y as u16);
+        (base, addr, (base & 0xFF00) != (addr & 0xFF00))
     }
 
-    fn ahx_store<M: Memory>(&mut self, mem: &mut M, addr: u16, value: u8) {
-        self.h_plus_one_store(mem, addr, value);
+    fn h_plus_one_indirect_y<M: Memory>(&mut self, mem: &mut M) -> (u16, u16, bool) {
+        let zp = self.fetch_byte(mem);
+        let lo = mem.read(zp as u16) as u16;
+        let hi = mem.read(zp.wrapping_add(1) as u16) as u16;
+        let base = (hi << 8) | lo;
+        let addr = base.wrapping_add(self.y as u16);
+        (base, addr, (base & 0xFF00) != (addr & 0xFF00))
+    }
+
+    fn h_plus_one_mask(base: u16) -> u8 {
+        ((base >> 8) as u8).wrapping_add(1)
+    }
+
+    fn h_plus_one_write_addr(addr: u16, value: u8, page_crossed: bool) -> u16 {
+        if page_crossed {
+            ((value as u16) << 8) | (addr & 0x00FF)
+        } else {
+            addr
+        }
+    }
+
+    fn h_plus_one_store<M: Memory>(
+        &mut self,
+        mem: &mut M,
+        base: u16,
+        addr: u16,
+        value: u8,
+        page_crossed: bool,
+    ) {
+        let stored = value & Self::h_plus_one_mask(base);
+        let write_addr = Self::h_plus_one_write_addr(addr, stored, page_crossed);
+        mem.write(write_addr, stored);
+    }
+
+    fn ahx_store<M: Memory>(
+        &mut self,
+        mem: &mut M,
+        base: u16,
+        addr: u16,
+        value: u8,
+        page_crossed: bool,
+    ) {
+        self.h_plus_one_store(mem, base, addr, value, page_crossed);
     }
 
     fn dcp_with_addr<M: Memory>(&mut self, mem: &mut M, addr: u16) {

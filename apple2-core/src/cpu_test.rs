@@ -333,6 +333,24 @@ mod tests {
     }
 
     #[test]
+    fn test_ahx_page_cross_replaces_high_address_byte_with_stored_value() {
+        let mut cpu = CPU::new();
+        let mut mem = TestMemory::new();
+
+        cpu.a = 0xFF;
+        cpu.x = 0x0F;
+        cpu.y = 0x01;
+        mem.ram[0] = 0x9F;
+        mem.ram[1] = 0xFF;
+        mem.ram[2] = 0x12;
+        cpu.pc = 0;
+
+        cpu.step(&mut mem);
+        assert_eq!(mem.ram[0x0300], 0x03);
+        assert_eq!(mem.ram[0x1300], 0x00);
+    }
+
+    #[test]
     fn test_shy_stores_y_masked_by_high_plus_one() {
         let mut cpu = CPU::new();
         let mut mem = TestMemory::new();
@@ -346,6 +364,23 @@ mod tests {
 
         cpu.step(&mut mem);
         assert_eq!(mem.ram[0x1235], 0x13);
+    }
+
+    #[test]
+    fn test_shy_page_cross_replaces_high_address_byte_with_stored_value() {
+        let mut cpu = CPU::new();
+        let mut mem = TestMemory::new();
+
+        cpu.x = 0x01;
+        cpu.y = 0x0F;
+        mem.ram[0] = 0x9C;
+        mem.ram[1] = 0xFF;
+        mem.ram[2] = 0x12;
+        cpu.pc = 0;
+
+        cpu.step(&mut mem);
+        assert_eq!(mem.ram[0x0300], 0x03);
+        assert_eq!(mem.ram[0x1300], 0x00);
     }
 
     #[test]
@@ -365,6 +400,23 @@ mod tests {
     }
 
     #[test]
+    fn test_shx_page_cross_replaces_high_address_byte_with_stored_value() {
+        let mut cpu = CPU::new();
+        let mut mem = TestMemory::new();
+
+        cpu.x = 0x0F;
+        cpu.y = 0x01;
+        mem.ram[0] = 0x9E;
+        mem.ram[1] = 0xFF;
+        mem.ram[2] = 0x12;
+        cpu.pc = 0;
+
+        cpu.step(&mut mem);
+        assert_eq!(mem.ram[0x0300], 0x03);
+        assert_eq!(mem.ram[0x1300], 0x00);
+    }
+
+    #[test]
     fn test_tas_updates_sp_and_stores_masked_value() {
         let mut cpu = CPU::new();
         let mut mem = TestMemory::new();
@@ -380,6 +432,25 @@ mod tests {
         cpu.step(&mut mem);
         assert_eq!(cpu.sp, 0xC0);
         assert_eq!(mem.ram[0x1235], 0x00);
+    }
+
+    #[test]
+    fn test_tas_page_cross_uses_stored_value_as_high_address_byte() {
+        let mut cpu = CPU::new();
+        let mut mem = TestMemory::new();
+
+        cpu.a = 0xF0;
+        cpu.x = 0x0F;
+        cpu.y = 0x01;
+        mem.ram[0] = 0x9B;
+        mem.ram[1] = 0xFF;
+        mem.ram[2] = 0x12;
+        cpu.pc = 0;
+
+        cpu.step(&mut mem);
+        assert_eq!(cpu.sp, 0x00);
+        assert_eq!(mem.ram[0x0000], 0x00);
+        assert_eq!(mem.ram[0x1300], 0x00);
     }
 
     #[test]
