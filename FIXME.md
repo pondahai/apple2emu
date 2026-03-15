@@ -8,6 +8,17 @@ to handle sub-byte bit slips and 10-bit sync patterns ($FF).
 Current "destructive read" logic is a proxy that might not be 100% accurate for 
 all DOS variants.
 
+**Current State**:
+- The read path now keeps bit-level internal state (`read_shift_register`,
+  `read_bit_phase`) and advances one bit every 4 CPU cycles.
+- To preserve DOS 3.3 compatibility, `data_latch` is still only published to the
+  CPU at byte boundaries.
+
+**Remaining Gaps**:
+- No true P6 state machine yet
+- No explicit bit-slip model
+- Sync / latch recovery behavior after destructive reads is still a conservative proxy
+
 ## 2. 6502 Illegal Opcodes in Official ROMs
 
 **Context**: Some official ROMs or Apple II software use "undocumented" opcodes 

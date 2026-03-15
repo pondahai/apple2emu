@@ -810,3 +810,28 @@
   * `cargo test -p apple2-core` 通過。
 * **目前定性**：
   * 這比前一版更接近已知 NMOS 6502 行為，但仍屬於高可信近似，不宜宣稱為已與所有晶片批次完全一致。
+
+## 43. Disk II read sequencer：保守版 bit-level 內部狀態 (2026-03-15)
+* **目標**：
+  * 讓 Disk II 讀路徑不再只是單純的「每 32 cycles 吐一個 byte」，而是開始保留 bit-level 讀取內部狀態，為後續更真實的 sequencer 行為鋪路。
+* **實作**：
+  * 在 `apple2-core/src/disk2.rs` 加入：
+    * `read_shift_register`
+    * `read_bit_phase`
+  * 讀模式下改為每 `4` cycles shift `1` bit。
+  * 但對 CPU 可見的 `data_latch` 仍只在 byte 邊界更新，避免直接破壞現有 DOS 路徑。
+* **關鍵取捨**：
+  * 第一版若讓 `data_latch` 在 bit-level 過程中即時更新，`save_smoke` 立刻退化，只停在 `APPLE ][`。
+  * 因此目前採用「bit-level state 內部存在，但 byte-boundary publish 對外可見」的保守模型。
+* **測試與驗證**：
+  * `apple2-core/src/disk2_test.rs` 新增：
+    * 每 `4` cycles 前進一個 bit 的測試
+    * destructive read 後，bit-level 狀態持續累積、但 latch 仍在下一個 byte boundary 恢復的測試
+  * `cargo test -p apple2-core`：通過
+  * `cargo run --quiet --bin save_smoke`：通過
+* **目前定性**：
+  * 這是 read sequencer 的安全地基，不是完整 P6 state machine。
+  * 下一步若要再往真機靠近，應優先處理：
+    * sync / bit-slip 語意
+    * destructive-read 之後的恢復窗口
+    * 在不破壞 DOS 3.3 基線下，逐步引入更細的 read 行為

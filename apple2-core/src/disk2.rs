@@ -18,6 +18,8 @@ pub struct Disk2 {
     pub byte_index: usize,
     pub cycles_accumulator: u32,
     pub data_latch: u8,
+    pub read_shift_register: u8,
+    pub read_bit_phase: u8,
     pub write_ready: bool,
     pub write_bit_phase: u8,
 }
@@ -42,6 +44,8 @@ impl Disk2 {
             byte_index: 0,
             cycles_accumulator: 0,
             data_latch: 0,
+            read_shift_register: 0,
+            read_bit_phase: 0,
             write_ready: false,
             write_bit_phase: 0,
         }
@@ -207,16 +211,33 @@ impl Disk2 {
                         self.byte_index = (self.byte_index + 1) % track.length;
                     }
                 }
+            } else if !self.load_mode && !self.write_mode {
+                while self.cycles_accumulator >= 4 {
+                    self.cycles_accumulator -= 4;
+                    let track = &mut self.tracks[self.current_track];
+                    if track.length == 0 {
+                        continue;
+                    }
+
+                    let bit_pos = 7 - self.read_bit_phase;
+                    let bit = (track.raw_bytes[self.byte_index] >> bit_pos) & 1;
+                    self.read_shift_register = (self.read_shift_register << 1) | bit;
+
+                    self.read_bit_phase += 1;
+                    if self.read_bit_phase >= 8 {
+                        self.read_bit_phase = 0;
+                        if (self.read_shift_register & 0x80) != 0 {
+                            self.data_latch = self.read_shift_register;
+                        }
+                        self.byte_index = (self.byte_index + 1) % track.length;
+                    }
+                }
             } else {
                 while self.cycles_accumulator >= 32 {
                     self.cycles_accumulator -= 32;
                     let track = &mut self.tracks[self.current_track];
                     if track.length > 0 {
-                        if !self.write_mode {
-                            // Q7 = 0, Q6 = 0: Read Mode
-                            self.data_latch = track.raw_bytes[self.byte_index];
-                        }
-                        // Other states only advance rotational position.
+                        // Other non-read states only advance rotational position.
                         self.byte_index = (self.byte_index + 1) % track.length;
                     }
                 }
@@ -230,6 +251,8 @@ impl Disk2 {
         self.byte_index = 0;
         self.cycles_accumulator = 0;
         self.data_latch = 0;
+        self.read_shift_register = 0;
+        self.read_bit_phase = 0;
         self.write_ready = false;
         self.write_bit_phase = 0;
         self.phases = [false; 4];

@@ -64,4 +64,50 @@ mod tests {
         assert_eq!(disk.current_qtr_track, 92);
         assert_eq!(disk.current_track, 23);
     }
+
+    #[test]
+    fn read_sequencer_advances_one_bit_every_four_cycles() {
+        let mut disk = Disk2::new();
+        disk.is_disk_loaded = true;
+        disk.current_track = 0;
+        disk.tracks[0].length = 1;
+        disk.tracks[0].raw_bytes[0] = 0xD5;
+
+        disk.write_io(0xC0E9, 0); // Motor on
+        disk.write_io(0xC0EC, 0); // Q6 = 0
+        disk.write_io(0xC0EE, 0); // Q7 = 0 (read mode)
+
+        disk.tick(4);
+        assert_eq!(disk.read_bit_phase, 1);
+        assert_eq!(disk.read_shift_register, 0x01);
+
+        disk.tick(28);
+        assert_eq!(disk.read_bit_phase, 0);
+        assert_eq!(disk.byte_index, 0);
+        assert_eq!(disk.data_latch, 0xD5);
+    }
+
+    #[test]
+    fn read_sequencer_keeps_bit_level_state_but_publishes_on_byte_boundary() {
+        let mut disk = Disk2::new();
+        disk.is_disk_loaded = true;
+        disk.current_track = 0;
+        disk.tracks[0].length = 1;
+        disk.tracks[0].raw_bytes[0] = 0xFF;
+
+        disk.write_io(0xC0E9, 0); // Motor on
+        disk.write_io(0xC0EC, 0); // Q6 = 0
+        disk.write_io(0xC0EE, 0); // Q7 = 0 (read mode)
+
+        disk.tick(32);
+        assert_eq!(disk.read_io(0xC0EC), 0xFF);
+        assert_eq!(disk.data_latch, 0x7F);
+
+        disk.tick(4);
+        assert_eq!(disk.read_bit_phase, 1);
+        assert_eq!(disk.data_latch, 0x7F);
+
+        disk.tick(28);
+        assert_eq!(disk.data_latch, 0xFF);
+    }
 }
