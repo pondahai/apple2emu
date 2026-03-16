@@ -112,6 +112,55 @@ mod tests {
     }
 
     #[test]
+    fn deferred_read_latch_update_waits_one_byte_boundary_before_publish() {
+        let mut disk = Disk2::new();
+        disk.is_disk_loaded = true;
+        disk.current_track = 0;
+        disk.tracks[0].length = 2;
+        disk.tracks[0].raw_bytes[0] = 0xD5;
+        disk.tracks[0].raw_bytes[1] = 0xAA;
+        disk.set_defer_read_latch_update(true);
+
+        disk.write_io(0xC0E9, 0); // Motor on
+        disk.write_io(0xC0EC, 0); // Q6 = 0
+        disk.write_io(0xC0EE, 0); // Q7 = 0 (read mode)
+
+        disk.tick(32);
+        assert_eq!(disk.data_latch, 0x00);
+        assert_eq!(disk.pending_read_latch, Some(0xD5));
+
+        disk.tick(32);
+        assert_eq!(disk.data_latch, 0xD5);
+        assert_eq!(disk.pending_read_latch, Some(0xAA));
+    }
+
+    #[test]
+    fn bitstream_read_mode_can_skip_a_source_bit_when_effective_length_is_shorter() {
+        let mut disk = Disk2::new();
+        disk.is_disk_loaded = true;
+        disk.current_track = 0;
+        disk.tracks[0].length = 2;
+        disk.tracks[0].read_length = 1;
+        disk.tracks[0].raw_bytes[0] = 0b1010_1010;
+        disk.tracks[0].raw_bytes[1] = 0b0101_0101;
+        disk.set_bitstream_read_mode(true);
+
+        disk.write_io(0xC0E9, 0); // Motor on
+        disk.write_io(0xC0EC, 0); // Q6 = 0
+        disk.write_io(0xC0EE, 0); // Q7 = 0 (read mode)
+
+        disk.tick(4);
+        assert_eq!(disk.read_shift_register, 0b0000_0001);
+
+        disk.tick(4);
+        assert_eq!(disk.read_shift_register, 0b0000_0011);
+        assert_eq!(disk.byte_index, 0);
+
+        disk.tick(24);
+        assert_eq!(disk.data_latch, 0xF0);
+    }
+
+    #[test]
     fn read_only_geometry_can_stretch_rotation_without_changing_track_length() {
         let mut disk = Disk2::new();
         disk.is_disk_loaded = true;

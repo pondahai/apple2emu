@@ -21,6 +21,13 @@ pub struct Disk2 {
     pub read_shift_register: u8,
     pub read_bit_phase: u8,
     pub read_rotation_accumulator: usize,
+    pub bitstream_read_mode: bool,
+    pub read_stream_position: usize,
+    pub defer_read_latch_update: bool,
+    pub prologue_sync_tweak: bool,
+    pub prologue_sync_bytes_remaining: u8,
+    pub recent_published_bytes: [u8; 3],
+    pub pending_read_latch: Option<u8>,
     pub write_ready: bool,
     pub write_bit_phase: u8,
 }
@@ -48,8 +55,42 @@ impl Disk2 {
             read_shift_register: 0,
             read_bit_phase: 0,
             read_rotation_accumulator: 0,
+            bitstream_read_mode: false,
+            read_stream_position: 0,
+            defer_read_latch_update: false,
+            prologue_sync_tweak: false,
+            prologue_sync_bytes_remaining: 0,
+            recent_published_bytes: [0; 3],
+            pending_read_latch: None,
             write_ready: false,
             write_bit_phase: 0,
+        }
+    }
+
+    pub fn set_defer_read_latch_update(&mut self, enabled: bool) {
+        self.defer_read_latch_update = enabled;
+        self.pending_read_latch = None;
+    }
+
+    pub fn set_prologue_sync_tweak(&mut self, enabled: bool) {
+        self.prologue_sync_tweak = enabled;
+        self.prologue_sync_bytes_remaining = 0;
+        self.recent_published_bytes = [0; 3];
+    }
+
+    pub fn set_bitstream_read_mode(&mut self, enabled: bool) {
+        self.bitstream_read_mode = enabled;
+        self.read_stream_position = 0;
+        self.byte_index = 0;
+    }
+
+    fn note_published_byte(&mut self, value: u8) {
+        self.recent_published_bytes[0] = self.recent_published_bytes[1];
+        self.recent_published_bytes[1] = self.recent_published_bytes[2];
+        self.recent_published_bytes[2] = value;
+
+        if self.prologue_sync_tweak && self.recent_published_bytes == [0xD5, 0xAA, 0x96] {
+            self.prologue_sync_bytes_remaining = 8;
         }
     }
 
@@ -221,44 +262,103 @@ impl Disk2 {
             } else if !self.load_mode && !self.write_mode {
                 while self.cycles_accumulator >= 4 {
                     self.cycles_accumulator -= 4;
-                    let track = &mut self.tracks[self.current_track];
+                    let track = &self.tracks[self.current_track];
                     if track.length == 0 {
                         continue;
                     }
 
-                    let bit_pos = 7 - self.read_bit_phase;
-                    let bit = (track.raw_bytes[self.byte_index] >> bit_pos) & 1;
+                    let track_length = track.length;
+                    let read_length = track.read_length;
+
+                    let bit = if self.bitstream_read_mode {
+                        let effective_bits = Self::effective_read_bit_length(track_length, read_length);
+                        let source_bit_index =
+                            Self::source_bit_index_for_stream(self.read_stream_position, track_length, effective_bits);
+                        let source_byte_index = source_bit_index / 8;
+                        let source_bit_phase = source_bit_index % 8;
+                        self.byte_index = source_byte_index;
+                        let bit = (track.raw_bytes[source_byte_index] >> (7 - source_bit_phase)) & 1;
+                        self.advance_read_stream_position(effective_bits);
+                        bit
+                    } else {
+                        let bit_pos = 7 - self.read_bit_phase;
+                        let bit = (track.raw_bytes[self.byte_index] >> bit_pos) & 1;
+                        bit
+                    };
                     self.read_shift_register = (self.read_shift_register << 1) | bit;
 
                     self.read_bit_phase += 1;
                     if self.read_bit_phase >= 8 {
-                        let track_length = track.length;
-                        let read_length = track.read_length;
                         self.read_bit_phase = 0;
-                        if (self.read_shift_register & 0x80) != 0 {
-                            self.data_latch = self.read_shift_register;
+                        let published_byte = self.read_shift_register;
+                        if self.defer_read_latch_update {
+                            if let Some(pending) = self.pending_read_latch.take() {
+                                self.data_latch = pending;
+                            }
+                            if (published_byte & 0x80) != 0 {
+                                self.pending_read_latch = Some(published_byte);
+                            }
+                        } else if (published_byte & 0x80) != 0 {
+                            self.data_latch = published_byte;
                         }
-                        self.advance_read_rotation(track_length, read_length);
+
+                        if (published_byte & 0x80) != 0 {
+                            self.note_published_byte(published_byte);
+                        }
+                        if !self.bitstream_read_mode {
+                            self.advance_read_rotation(track_length, read_length);
+                        }
                     }
                 }
             } else {
-                while self.cycles_accumulator >= 32 {
-                    self.cycles_accumulator -= 32;
-                    let track = &mut self.tracks[self.current_track];
+                let step_cycles = if self.bitstream_read_mode { 4 } else { 32 };
+                while self.cycles_accumulator >= step_cycles {
+                    self.cycles_accumulator -= step_cycles;
+                    let track = &self.tracks[self.current_track];
                     if track.length > 0 {
-                        let track_length = track.length;
-                        let read_length = track.read_length;
-                        // Non-write states still rotate the disk, but read-only geometry
-                        // can stretch the apparent revolution length without changing bytes.
-                        self.advance_read_rotation(track_length, read_length);
+                        if self.bitstream_read_mode {
+                            let effective_bits =
+                                Self::effective_read_bit_length(track.length, track.read_length);
+                            self.advance_read_stream_position(effective_bits);
+                        } else {
+                            let track_length = track.length;
+                            let read_length = track.read_length;
+                            // Non-write states still rotate the disk, but read-only geometry
+                            // can stretch the apparent revolution length without changing bytes.
+                            self.advance_read_rotation(track_length, read_length);
+                        }
                     }
                 }
             }
         }
     }
 
+    fn effective_read_bit_length(actual_length: usize, read_length: usize) -> usize {
+        let effective_read_length = if read_length == 0 { actual_length } else { read_length };
+        effective_read_length.saturating_mul(8).max(1)
+    }
+
+    fn source_bit_index_for_stream(
+        read_stream_position: usize,
+        actual_length: usize,
+        effective_bits: usize,
+    ) -> usize {
+        let actual_bits = actual_length.saturating_mul(8).max(1);
+        ((read_stream_position % effective_bits) * actual_bits / effective_bits) % actual_bits
+    }
+
+    fn advance_read_stream_position(&mut self, effective_bits: usize) {
+        self.read_stream_position = (self.read_stream_position + 1) % effective_bits;
+    }
+
     fn advance_read_rotation(&mut self, actual_length: usize, read_length: usize) {
         if actual_length == 0 {
+            return;
+        }
+
+        if self.prologue_sync_bytes_remaining > 0 {
+            self.prologue_sync_bytes_remaining -= 1;
+            self.byte_index = (self.byte_index + 1) % actual_length;
             return;
         }
 
@@ -280,6 +380,10 @@ impl Disk2 {
         self.read_shift_register = 0;
         self.read_bit_phase = 0;
         self.read_rotation_accumulator = 0;
+        self.read_stream_position = 0;
+        self.prologue_sync_bytes_remaining = 0;
+        self.recent_published_bytes = [0; 3];
+        self.pending_read_latch = None;
         self.write_bit_phase = 0;
     }
 

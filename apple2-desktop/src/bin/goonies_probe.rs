@@ -192,14 +192,258 @@ fn env_usize(name: &str) -> Option<usize> {
     env::var(name).ok().and_then(|val| val.parse::<usize>().ok())
 }
 
+fn env_path(name: &str) -> Option<PathBuf> {
+    env::var(name).ok().map(PathBuf::from)
+}
+
+fn push_changed_offsets(
+    out: &mut String,
+    before: &[u8],
+    after: &[u8],
+    base: usize,
+    limit: usize,
+) -> (usize, bool) {
+    let mut change_count = 0usize;
+    let mut any_nonzero = false;
+
+    for (idx, (&prev, &next)) in before.iter().zip(after.iter()).enumerate() {
+        if next != 0 {
+            any_nonzero = true;
+        }
+        if prev != next && change_count < limit {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            let _ = write!(out, "{:04X}:{:02X}->{:02X}", base + idx, prev, next);
+            change_count += 1;
+        }
+    }
+
+    (change_count, any_nonzero)
+}
+
+fn stack_word(machine: &Apple2Machine, sp: u8, depth: usize) -> u16 {
+    let lo_addr = 0x0100usize + sp as usize + 1 + depth * 2;
+    let hi_addr = lo_addr + 1;
+    if hi_addr > 0x01FF {
+        return 0;
+    }
+    machine.mem.ram[lo_addr] as u16 | ((machine.mem.ram[hi_addr] as u16) << 8)
+}
+
+fn format_stack_words(machine: &Apple2Machine, sp: u8, count: usize) -> String {
+    let mut out = String::new();
+    for depth in 0..count {
+        let lo_addr = 0x0100usize + sp as usize + 1 + depth * 2;
+        let hi_addr = lo_addr + 1;
+        if hi_addr > 0x01FF {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        let raw = stack_word(machine, sp, depth);
+        let _ = write!(
+            out,
+            "@{:04X}/{:04X}={:04X}",
+            lo_addr,
+            hi_addr,
+            raw
+        );
+    }
+    out
+}
+
+fn format_zp_pairs(machine: &Apple2Machine, addrs: &[(u8, u8)]) -> String {
+    let mut out = String::new();
+    for &(lo, hi) in addrs {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        let ptr = machine.mem.ram[lo as usize] as u16 | ((machine.mem.ram[hi as usize] as u16) << 8);
+        let _ = write!(out, "{:02X}/{:02X}={:04X}", lo, hi, ptr);
+    }
+    out
+}
+
+fn format_last_write_log(log: &[(u16, u8, u64, usize, u8); 4]) -> String {
+    let labels = ["E6", "E7", "E8", "E9"];
+    let mut out = String::new();
+    for (idx, (pc, value, cycles, disk_idx, latch)) in log.iter().enumerate() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        let _ = write!(
+            out,
+            "{}@{:04X}={:02X}/cy{}/idx{}/l{:02X}",
+            labels[idx],
+            pc,
+            value,
+            cycles,
+            disk_idx,
+            latch
+        );
+    }
+    out
+}
+
+#[derive(Clone, Copy, Default)]
+struct C08cReadSample {
+    pc: u16,
+    cycles: u64,
+    value: u8,
+    idx_before: usize,
+    idx_after: usize,
+    latch: u8,
+}
+
+#[derive(Clone, Copy, Default)]
+struct DecodeStepSample {
+    pc_before: u16,
+    pc_after: u16,
+    a: u8,
+    x: u8,
+    y: u8,
+    sp: u8,
+    p: u8,
+    idx: usize,
+    latch: u8,
+}
+
+fn push_ring<T: Copy, const N: usize>(ring: &mut [T; N], len: &mut usize, next: &mut usize, value: T) {
+    ring[*next] = value;
+    *next = (*next + 1) % N;
+    if *len < N {
+        *len += 1;
+    }
+}
+
+fn format_c08c_history(history: &[C08cReadSample], len: usize, next: usize) -> String {
+    let mut out = String::new();
+    for pos in 0..len {
+        let idx = (next + history.len() - len + pos) % history.len();
+        let sample = history[idx];
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        let _ = write!(
+            out,
+            "@{:04X}/cy{}={:02X}[{}>{}]/l{:02X}",
+            sample.pc,
+            sample.cycles,
+            sample.value,
+            sample.idx_before,
+            sample.idx_after,
+            sample.latch
+        );
+    }
+    out
+}
+
+fn format_decode_history(history: &[DecodeStepSample], len: usize, next: usize) -> String {
+    let mut out = String::new();
+    for pos in 0..len {
+        let idx = (next + history.len() - len + pos) % history.len();
+        let sample = history[idx];
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        let _ = write!(
+            out,
+            "{:04X}->{:04X}:a{:02X} x{:02X} y{:02X} sp{:02X} p{:02X} idx{} l{:02X}",
+            sample.pc_before,
+            sample.pc_after,
+            sample.a,
+            sample.x,
+            sample.y,
+            sample.sp,
+            sample.p,
+            sample.idx,
+            sample.latch
+        );
+    }
+    out
+}
+
+fn classify_decode_sample(e6: u8, e7: u8, e8: u8, e9: u8) -> &'static str {
+    if e9 == 0xFE && e8 == 0x17 && (0x03..=0x0F).contains(&e7) && e6 == (e9 ^ e8 ^ e7) {
+        "good"
+    } else {
+        "bad"
+    }
+}
+
+fn format_track_window(track: &TrackData, start: usize, len: usize) -> String {
+    if track.length == 0 || len == 0 {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    for offset in 0..len {
+        let idx = (start + offset) % track.length;
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        let _ = write!(out, "{:04}:{:02X}", idx, track.raw_bytes[idx]);
+    }
+    out
+}
+
+fn format_last_write_track_window(track: &TrackData, log: &[(u16, u8, u64, usize, u8); 4]) -> String {
+    if track.length == 0 {
+        return String::new();
+    }
+
+    let mut min_idx = usize::MAX;
+    let mut max_idx = 0usize;
+    let mut any = false;
+
+    for &(_, _, _, disk_idx, _) in log {
+        if disk_idx < track.length {
+            min_idx = min_idx.min(disk_idx);
+            max_idx = max_idx.max(disk_idx);
+            any = true;
+        }
+    }
+
+    if !any {
+        return String::new();
+    }
+
+    if max_idx >= min_idx && max_idx - min_idx <= 24 {
+        format_track_window(track, min_idx.saturating_sub(2), (max_idx - min_idx + 5).min(32))
+    } else {
+        let mut out = String::new();
+        for &(_, _, _, disk_idx, _) in log {
+            if !out.is_empty() {
+                out.push_str(" | ");
+            }
+            let start = disk_idx.saturating_sub(1);
+            out.push_str(&format_track_window(track, start, 4));
+        }
+        out
+    }
+}
+
+fn format_optional_track_window(track: &TrackData, center: Option<usize>, radius: usize) -> String {
+    let Some(center) = center else {
+        return String::from("none");
+    };
+    if track.length == 0 {
+        return String::new();
+    }
+    let start = center.saturating_sub(radius);
+    format_track_window(track, start, radius.saturating_mul(2).saturating_add(1))
+}
+
 fn main() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
         .to_path_buf();
     let roms_dir = root.join("roms");
-    let disk_path =
-        PathBuf::from(r"C:\Users\pondahai\Downloads\AppleWin1.26.1.1\ac\goonies.dsk.gz");
+    let disk_path = env_path("GOONIES_DISK_PATH")
+        .unwrap_or_else(|| PathBuf::from(r"C:\Users\pondahai\Downloads\AppleWin1.26.1.1\ac\goonies.dsk.gz"));
 
     let main_rom = std::fs::read(roms_dir.join("APPLE2PLUS.ROM")).expect("read APPLE2PLUS.ROM");
     let disk_rom = std::fs::read(roms_dir.join("DISK2.ROM")).expect("read DISK2.ROM");
@@ -211,8 +455,18 @@ fn main() {
     machine.mem.disk2.load_disk(&disk);
     let patch_volume_zero = env_flag("GOONIES_PATCH_VOLUME_ZERO");
     let stretch_track23_read_len = env_flag("GOONIES_STRETCH_TRACK23_READLEN");
+    let defer_read_latch_update = env_flag("GOONIES_DEFER_READ_LATCH_UPDATE");
+    let bitstream_read_mode = env_flag("GOONIES_BITSTREAM_READ_MODE");
+    let prologue_sync_tweak = env_flag("GOONIES_PROLOGUE_SYNC_TWEAK");
     let max_steps = env_u32("GOONIES_MAX_STEPS", 2_000_000);
     let track23_read_len_override = env_usize("GOONIES_TRACK23_READLEN");
+
+    machine
+        .mem
+        .disk2
+        .set_defer_read_latch_update(defer_read_latch_update);
+    machine.mem.disk2.set_prologue_sync_tweak(prologue_sync_tweak);
+    machine.mem.disk2.set_bitstream_read_mode(bitstream_read_mode);
 
     if let Some(track) = machine.mem.disk2.tracks.get_mut(23) {
         if let Some(read_len) = track23_read_len_override {
@@ -227,9 +481,12 @@ fn main() {
         }
     }
     println!(
-        "probe options: patch_volume_zero={} stretch_track23_read_len={} track23_read_len_override={:?} max_steps={}",
+        "probe options: patch_volume_zero={} stretch_track23_read_len={} defer_read_latch_update={} prologue_sync_tweak={} bitstream_read_mode={} track23_read_len_override={:?} max_steps={}",
         patch_volume_zero,
         stretch_track23_read_len,
+        defer_read_latch_update,
+        prologue_sync_tweak,
+        bitstream_read_mode,
         track23_read_len_override,
         max_steps
     );
@@ -266,37 +523,141 @@ fn main() {
     let mut high_jump_logs = 0u32;
     let mut seen_0400_consumer = false;
     let mut watch_4c_logs = 0u32;
+    let mut watch_27_logs = 0u32;
+    let mut watch_26_logs = 0u32;
     let mut call0300_logs = 0u32;
     let mut path05a0_logs = 0u32;
+    let mut stack_watch_logs = 0u32;
+    let mut zp_watch_logs = 0u32;
+    let mut suspicious_ram_logs = 0u32;
+    let mut stack_slot_logs = 0u32;
+    let mut first_ram_target_logs = 0u32;
+    let mut deep_frame_logs = 0u32;
+    let mut unwind_logs = 0u32;
+    let mut zp_e6_watch_logs = 0u32;
     let mut prev_4c_window = [0u8; 0x80];
+    let mut prev_27_window = [0u8; 0x80];
+    let mut prev_26_window = [0u8; 0x80];
+    let mut prev_stack_page = [0u8; 0x100];
+    let mut prev_zp_pairs = [0u16; 6];
+    let mut prev_e6e9 = [0u8; 4];
+    let mut last_e6e9_write = [(0u16, 0u8, 0u64, 0usize, 0u8); 4];
+    let mut recent_c08c_reads = [C08cReadSample::default(); 12];
+    let mut recent_c08c_reads_len = 0usize;
+    let mut recent_c08c_reads_next = 0usize;
+    let mut recent_decode_steps = [DecodeStepSample::default(); 24];
+    let mut recent_decode_steps_len = 0usize;
+    let mut recent_decode_steps_next = 0usize;
+    let mut decode_sample_logs = 0u32;
+    let mut last_prologue_idx = None::<usize>;
+    let zp_pair_addrs = [(0xE0, 0xE1), (0xE4, 0xE5), (0xE6, 0xE7), (0xE8, 0xE9), (0xF8, 0xF9), (0xFE, 0xFF)];
 
     prev_4c_window.copy_from_slice(&machine.mem.ram[0x4C00..0x4C80]);
+    prev_27_window.copy_from_slice(&machine.mem.ram[0x2700..0x2780]);
+    prev_26_window.copy_from_slice(&machine.mem.ram[0x2600..0x2680]);
+    prev_stack_page.copy_from_slice(&machine.mem.ram[0x0100..0x0200]);
+    for (idx, &(lo, hi)) in zp_pair_addrs.iter().enumerate() {
+        prev_zp_pairs[idx] =
+            machine.mem.ram[lo as usize] as u16 | ((machine.mem.ram[hi as usize] as u16) << 8);
+    }
+    prev_e6e9.copy_from_slice(&machine.mem.ram[0x00E6..0x00EA]);
 
     for step in 0..max_steps {
         let pc_before = machine.cpu.pc;
         let cycles_before = machine.total_cycles;
         let track_before = machine.mem.disk2.current_track;
         let idx_before = machine.mem.disk2.byte_index;
+        let sp_before = machine.cpu.sp;
         let cycles = machine.step();
+
+        if (0x03A8..=0x03BF).contains(&pc_before) {
+            push_ring(
+                &mut recent_decode_steps,
+                &mut recent_decode_steps_len,
+                &mut recent_decode_steps_next,
+                DecodeStepSample {
+                    pc_before,
+                    pc_after: machine.cpu.pc,
+                    a: machine.cpu.a,
+                    x: machine.cpu.x,
+                    y: machine.cpu.y,
+                    sp: machine.cpu.sp,
+                    p: machine.cpu.status.to_byte(),
+                    idx: machine.mem.disk2.byte_index,
+                    latch: machine.mem.disk2.data_latch,
+                },
+            );
+        }
+
+        for offset in 0..4usize {
+            let value = machine.mem.ram[0x00E6 + offset];
+            if value != prev_e6e9[offset] {
+                last_e6e9_write[offset] = (
+                    pc_before,
+                    value,
+                    cycles_before,
+                    machine.mem.disk2.byte_index,
+                    machine.mem.disk2.data_latch,
+                );
+                if zp_e6_watch_logs < 160 {
+                    println!(
+                        "zp_e6e9_write pc={:04X}->{:04X} addr={:04X} {:02X}->{:02X} a={:02X} x={:02X} y={:02X} sp={:02X} p={:02X} idx={} latch={:02X}",
+                        pc_before,
+                        machine.cpu.pc,
+                        0x00E6 + offset,
+                        prev_e6e9[offset],
+                        value,
+                        machine.cpu.a,
+                        machine.cpu.x,
+                        machine.cpu.y,
+                        machine.cpu.sp,
+                        machine.cpu.status.to_byte(),
+                        machine.mem.disk2.byte_index,
+                        machine.mem.disk2.data_latch
+                    );
+                    zp_e6_watch_logs += 1;
+                }
+                prev_e6e9[offset] = value;
+            }
+        }
+
+        if (pc_before == 0x03BC || pc_before == 0x03BF) && decode_sample_logs < 120 {
+            let e6 = machine.mem.ram[0x00E6];
+            let e7 = machine.mem.ram[0x00E7];
+            let e8 = machine.mem.ram[0x00E8];
+            let e9 = machine.mem.ram[0x00E9];
+            println!(
+                "decode_sample kind={} pc={:04X}->{:04X} e6..e9={:02X} {:02X} {:02X} {:02X} last_prologue={:?} prologue_win={} last_writes={} track_win={} c08c_hist={} decode_hist={}",
+                classify_decode_sample(e6, e7, e8, e9),
+                pc_before,
+                machine.cpu.pc,
+                e6,
+                e7,
+                e8,
+                e9,
+                last_prologue_idx,
+                format_optional_track_window(&machine.mem.disk2.tracks[track_before], last_prologue_idx, 4),
+                format_last_write_log(&last_e6e9_write),
+                format_last_write_track_window(&machine.mem.disk2.tracks[track_before], &last_e6e9_write),
+                format_c08c_history(
+                    &recent_c08c_reads,
+                    recent_c08c_reads_len,
+                    recent_c08c_reads_next
+                ),
+                format_decode_history(
+                    &recent_decode_steps,
+                    recent_decode_steps_len,
+                    recent_decode_steps_next
+                )
+            );
+            decode_sample_logs += 1;
+        }
 
         if seen_0400_consumer && watch_4c_logs < 32 {
             let current_4c = &machine.mem.ram[0x4C00..0x4C80];
             let mut changed_offsets = String::new();
-            let mut change_count = 0usize;
-            let mut any_nonzero = false;
-
-            for (idx, (&before, &after)) in prev_4c_window.iter().zip(current_4c.iter()).enumerate() {
-                if after != 0 {
-                    any_nonzero = true;
-                }
-                if before != after && change_count < 8 {
-                    if !changed_offsets.is_empty() {
-                        changed_offsets.push(' ');
-                    }
-                    let _ = write!(changed_offsets, "{:02X}:{:02X}->{:02X}", idx, before, after);
-                    change_count += 1;
-                }
-            }
+            let (change_count, any_nonzero) =
+                push_changed_offsets(&mut changed_offsets, &prev_4c_window, current_4c, 0x4C00, 8);
 
             if change_count > 0 {
                 println!(
@@ -320,6 +681,294 @@ fn main() {
             }
 
             prev_4c_window.copy_from_slice(current_4c);
+        }
+
+        if seen_0400_consumer && watch_27_logs < 32 {
+            let current_27 = &machine.mem.ram[0x2700..0x2780];
+            let mut changed_offsets = String::new();
+            let (change_count, any_nonzero) =
+                push_changed_offsets(&mut changed_offsets, &prev_27_window, current_27, 0x2700, 8);
+
+            if change_count > 0 {
+                println!(
+                    "write_27 pc={:04X}->{:04X} a={:02X} x={:02X} y={:02X} sp={:02X} p={:02X} nonzero={} qtr={} track={} idx={} latch={:02X}",
+                    pc_before,
+                    machine.cpu.pc,
+                    machine.cpu.a,
+                    machine.cpu.x,
+                    machine.cpu.y,
+                    machine.cpu.sp,
+                    machine.cpu.status.to_byte(),
+                    any_nonzero,
+                    machine.mem.disk2.current_qtr_track,
+                    machine.mem.disk2.current_track,
+                    machine.mem.disk2.byte_index,
+                    machine.mem.disk2.data_latch
+                );
+                println!("write_27_changes {}", changed_offsets);
+                dump_ram(&machine, 0x2700, 0x80);
+                watch_27_logs += 1;
+            }
+
+            prev_27_window.copy_from_slice(current_27);
+        }
+
+        if seen_0400_consumer && watch_26_logs < 32 {
+            let current_26 = &machine.mem.ram[0x2600..0x2680];
+            let mut changed_offsets = String::new();
+            let (change_count, any_nonzero) =
+                push_changed_offsets(&mut changed_offsets, &prev_26_window, current_26, 0x2600, 8);
+
+            if change_count > 0 {
+                println!(
+                    "write_26 pc={:04X}->{:04X} a={:02X} x={:02X} y={:02X} sp={:02X} p={:02X} nonzero={} qtr={} track={} idx={} latch={:02X}",
+                    pc_before,
+                    machine.cpu.pc,
+                    machine.cpu.a,
+                    machine.cpu.x,
+                    machine.cpu.y,
+                    machine.cpu.sp,
+                    machine.cpu.status.to_byte(),
+                    any_nonzero,
+                    machine.mem.disk2.current_qtr_track,
+                    machine.mem.disk2.current_track,
+                    machine.mem.disk2.byte_index,
+                    machine.mem.disk2.data_latch
+                );
+                println!("write_26_changes {}", changed_offsets);
+                dump_ram(&machine, 0x2600, 0x80);
+                watch_26_logs += 1;
+            }
+
+            prev_26_window.copy_from_slice(current_26);
+        }
+
+        if seen_0400_consumer && stack_watch_logs < 160 {
+            let stack_now = &machine.mem.ram[0x0100..0x0200];
+            let mut changed_stack = String::new();
+            let (change_count, _) =
+                push_changed_offsets(&mut changed_stack, &prev_stack_page, stack_now, 0x0100, 8);
+
+            if sp_before != machine.cpu.sp || change_count > 0 {
+                println!(
+                    "stack_watch pc={:04X}->{:04X} sp={:02X}->{:02X} a={:02X} x={:02X} y={:02X} p={:02X} stack_top={} zp_ptrs={}",
+                    pc_before,
+                    machine.cpu.pc,
+                    sp_before,
+                    machine.cpu.sp,
+                    machine.cpu.a,
+                    machine.cpu.x,
+                    machine.cpu.y,
+                    machine.cpu.status.to_byte(),
+                    format_stack_words(&machine, machine.cpu.sp, 4),
+                    format_zp_pairs(&machine, &zp_pair_addrs)
+                );
+                if change_count > 0 {
+                    println!("stack_changes {}", changed_stack);
+                }
+                stack_watch_logs += 1;
+            }
+
+            prev_stack_page.copy_from_slice(stack_now);
+        }
+
+        if seen_0400_consumer && zp_watch_logs < 120 {
+            let mut changed = String::new();
+            let mut changed_any = false;
+            for (idx, &(lo, hi)) in zp_pair_addrs.iter().enumerate() {
+                let ptr =
+                    machine.mem.ram[lo as usize] as u16 | ((machine.mem.ram[hi as usize] as u16) << 8);
+                if ptr != prev_zp_pairs[idx] {
+                    if !changed.is_empty() {
+                        changed.push(' ');
+                    }
+                    let _ = write!(
+                        changed,
+                        "{:02X}/{:02X}:{:04X}->{:04X}",
+                        lo,
+                        hi,
+                        prev_zp_pairs[idx],
+                        ptr
+                    );
+                    prev_zp_pairs[idx] = ptr;
+                    changed_any = true;
+                }
+            }
+
+            if changed_any {
+                println!(
+                    "zp_watch pc={:04X}->{:04X} a={:02X} x={:02X} y={:02X} sp={:02X} p={:02X} changes={}",
+                    pc_before,
+                    machine.cpu.pc,
+                    machine.cpu.a,
+                    machine.cpu.x,
+                    machine.cpu.y,
+                    machine.cpu.sp,
+                    machine.cpu.status.to_byte(),
+                    changed
+                );
+                zp_watch_logs += 1;
+            }
+        }
+
+        if stack_slot_logs < 48
+            && (prev_stack_page[0xF9] != machine.mem.ram[0x01F9]
+                || prev_stack_page[0xFA] != machine.mem.ram[0x01FA]
+                || prev_stack_page[0xF7] != machine.mem.ram[0x01F7]
+                || prev_stack_page[0xF8] != machine.mem.ram[0x01F8])
+        {
+            println!(
+                "stack_slot pc={:04X}->{:04X} sp={:02X}->{:02X} 01F7..01FA={:02X} {:02X} {:02X} {:02X} stack_top={} zp_ptrs={}",
+                pc_before,
+                machine.cpu.pc,
+                sp_before,
+                machine.cpu.sp,
+                machine.mem.ram[0x01F7],
+                machine.mem.ram[0x01F8],
+                machine.mem.ram[0x01F9],
+                machine.mem.ram[0x01FA],
+                format_stack_words(&machine, machine.cpu.sp, 6),
+                format_zp_pairs(&machine, &zp_pair_addrs)
+            );
+            stack_slot_logs += 1;
+        }
+
+        if first_ram_target_logs < 24 {
+            let current_26 = &machine.mem.ram[0x2600..0x2680];
+            let current_27 = &machine.mem.ram[0x2700..0x2780];
+            let current_4c = &machine.mem.ram[0x4C00..0x4C80];
+            let mut changed = String::new();
+            let (change_26, nonzero_26) =
+                push_changed_offsets(&mut changed, &prev_26_window, current_26, 0x2600, 4);
+            let (change_27, nonzero_27) =
+                push_changed_offsets(&mut changed, &prev_27_window, current_27, 0x2700, 4);
+            let (change_4c, nonzero_4c) =
+                push_changed_offsets(&mut changed, &prev_4c_window, current_4c, 0x4C00, 4);
+
+            if change_26 > 0
+                || change_27 > 0
+                || change_4c > 0
+                || nonzero_26
+                || nonzero_27
+                || nonzero_4c
+            {
+                println!(
+                    "target_ram pc={:04X}->{:04X} sp={:02X}->{:02X} seen0400={} nonzero26={} nonzero27={} nonzero4c={} changes={}",
+                    pc_before,
+                    machine.cpu.pc,
+                    sp_before,
+                    machine.cpu.sp,
+                    seen_0400_consumer,
+                    nonzero_26,
+                    nonzero_27,
+                    nonzero_4c,
+                    changed
+                );
+                if change_26 > 0 || nonzero_26 {
+                    dump_ram(&machine, 0x2600, 0x80);
+                }
+                if change_27 > 0 || nonzero_27 {
+                    dump_ram(&machine, 0x2700, 0x80);
+                }
+                if change_4c > 0 || nonzero_4c {
+                    dump_ram(&machine, 0x4C00, 0x80);
+                }
+                first_ram_target_logs += 1;
+            }
+        }
+
+        if deep_frame_logs < 160
+            && matches!(
+                pc_before,
+                0x0535 | 0x0553 | 0x055B | 0x05B2 | 0x05B5 | 0x05BA | 0x05CD | 0x05D4
+            )
+        {
+            println!(
+                "deep_frame pc={:04X}->{:04X} a={:02X} x={:02X} y={:02X} sp={:02X}->{:02X} p={:02X} stack_top={} zp_ptrs={} 0269={:02X} 026c={:02X} 026e={:02X} 028e={:02X}",
+                pc_before,
+                machine.cpu.pc,
+                machine.cpu.a,
+                machine.cpu.x,
+                machine.cpu.y,
+                sp_before,
+                machine.cpu.sp,
+                machine.cpu.status.to_byte(),
+                format_stack_words(&machine, machine.cpu.sp, 8),
+                format_zp_pairs(&machine, &zp_pair_addrs),
+                machine.mem.ram[0x0269],
+                machine.mem.ram[0x026C],
+                machine.mem.ram[0x026E],
+                machine.mem.ram[0x028E]
+            );
+            deep_frame_logs += 1;
+        }
+
+        if pc_before == 0x0535 && machine.cpu.pc == 0x0537 {
+            println!(
+                "reject0535 a={:02X} x={:02X} y={:02X} sp={:02X} p={:02X} e6..e9={:02X} {:02X} {:02X} {:02X} kind={} last_prologue={:?} prologue_win={} last_writes={} track_win={} c08c_hist={} decode_hist={} stack_top={} idx={} latch={:02X}",
+                machine.cpu.a,
+                machine.cpu.x,
+                machine.cpu.y,
+                machine.cpu.sp,
+                machine.cpu.status.to_byte(),
+                machine.mem.ram[0x00E6],
+                machine.mem.ram[0x00E7],
+                machine.mem.ram[0x00E8],
+                machine.mem.ram[0x00E9],
+                classify_decode_sample(
+                    machine.mem.ram[0x00E6],
+                    machine.mem.ram[0x00E7],
+                    machine.mem.ram[0x00E8],
+                    machine.mem.ram[0x00E9]
+                ),
+                last_prologue_idx,
+                format_optional_track_window(&machine.mem.disk2.tracks[track_before], last_prologue_idx, 4),
+                format_last_write_log(&last_e6e9_write),
+                format_last_write_track_window(&machine.mem.disk2.tracks[track_before], &last_e6e9_write),
+                format_c08c_history(
+                    &recent_c08c_reads,
+                    recent_c08c_reads_len,
+                    recent_c08c_reads_next
+                ),
+                format_decode_history(
+                    &recent_decode_steps,
+                    recent_decode_steps_len,
+                    recent_decode_steps_next
+                ),
+                format_stack_words(&machine, machine.cpu.sp, 8),
+                machine.mem.disk2.byte_index,
+                machine.mem.disk2.data_latch
+            );
+        }
+
+        if unwind_logs < 160 {
+            let sp_after = machine.cpu.sp;
+            let pc_after = machine.cpu.pc;
+            let returned_to_038x = matches!(pc_after, 0x0380..=0x03FF) && pc_before >= 0x0400;
+            let frame_drop =
+                sp_after > sp_before && (pc_before >= 0x0500 || matches!(pc_before, 0x0431 | 0x0437 | 0x043D | 0x0443 | 0x046D));
+            if returned_to_038x || frame_drop {
+                println!(
+                    "unwind pc={:04X}->{:04X} sp={:02X}->{:02X} a={:02X} x={:02X} y={:02X} p={:02X} stack_top={} zp_ptrs={} 0269={:02X} 026c={:02X} 026e={:02X} 028e={:02X} idx={} latch={:02X}",
+                    pc_before,
+                    pc_after,
+                    sp_before,
+                    sp_after,
+                    machine.cpu.a,
+                    machine.cpu.x,
+                    machine.cpu.y,
+                    machine.cpu.status.to_byte(),
+                    format_stack_words(&machine, sp_after, 8),
+                    format_zp_pairs(&machine, &zp_pair_addrs),
+                    machine.mem.ram[0x0269],
+                    machine.mem.ram[0x026C],
+                    machine.mem.ram[0x026E],
+                    machine.mem.ram[0x028E],
+                    machine.mem.disk2.byte_index,
+                    machine.mem.disk2.data_latch
+                );
+                unwind_logs += 1;
+            }
         }
 
         if machine.cpu.pc == last_pc {
@@ -354,6 +1003,37 @@ fn main() {
             0x03AD => pc_03ad_hits += 1,
             0x03B5 => pc_03b5_hits += 1,
             _ => {}
+        }
+
+        if matches!(pc_before, 0x038B | 0x0395 | 0x03A0 | 0x03AD | 0x03B5) && track_before == 23 {
+            push_ring(
+                &mut recent_c08c_reads,
+                &mut recent_c08c_reads_len,
+                &mut recent_c08c_reads_next,
+                C08cReadSample {
+                    pc: pc_before,
+                    cycles: cycles_before,
+                    value: machine.cpu.a,
+                    idx_before,
+                    idx_after: machine.mem.disk2.byte_index,
+                    latch: machine.mem.disk2.data_latch,
+                },
+            );
+
+            if pc_before == 0x03A0
+                && machine.cpu.a == 0x96
+                && recent_c08c_reads_len >= 3
+            {
+                for back in 1..=recent_c08c_reads_len.min(8) {
+                    let idx = (recent_c08c_reads_next + recent_c08c_reads.len() - back)
+                        % recent_c08c_reads.len();
+                    let sample = recent_c08c_reads[idx];
+                    if sample.pc == 0x038B && sample.value == 0xD5 {
+                        last_prologue_idx = Some(sample.idx_after);
+                        break;
+                    }
+                }
+            }
         }
 
         if matches!(pc_before, 0x038B | 0x0395 | 0x03A0 | 0x03AD | 0x03B5)
@@ -948,6 +1628,39 @@ fn main() {
                 dump_ram(&machine, region_start, 0x60);
             }
             high_jump_logs += 1;
+        }
+
+        if seen_0400_consumer
+            && suspicious_ram_logs < 48
+            && matches!(machine.cpu.pc, 0x2618 | 0x4C62)
+        {
+            let opcode = peek_byte(&machine, pc_before);
+            let op1 = peek_byte(&machine, pc_before.wrapping_add(1));
+            let op2 = peek_byte(&machine, pc_before.wrapping_add(2));
+            println!(
+                "suspicious_ram from={:04X} to={:04X} kind={} opcode={:02X} ops={:02X} {:02X} a={:02X} x={:02X} y={:02X} sp={:02X} p={:02X} stack_top={} zp_ptrs={}",
+                pc_before,
+                machine.cpu.pc,
+                classify_control_transfer(&machine, pc_before, machine.cpu.pc),
+                opcode,
+                op1,
+                op2,
+                machine.cpu.a,
+                machine.cpu.x,
+                machine.cpu.y,
+                machine.cpu.sp,
+                machine.cpu.status.to_byte(),
+                format_stack_words(&machine, machine.cpu.sp, 6),
+                format_zp_pairs(&machine, &zp_pair_addrs)
+            );
+            let region_start = machine.cpu.pc.saturating_sub(0x10) as usize;
+            dump_ram(&machine, region_start, 0x30);
+            dump_ram(&machine, 0x0100, 0x100);
+            dump_ram(&machine, 0x00E0, 0x20);
+            dump_ram(&machine, 0x2600, 0x80);
+            dump_ram(&machine, 0x2700, 0x80);
+            dump_ram(&machine, 0x4C00, 0x80);
+            suspicious_ram_logs += 1;
         }
 
         if same_pc_count >= 100_000 {
