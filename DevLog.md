@@ -835,3 +835,20 @@
     * sync / bit-slip 語意
     * destructive-read 之後的恢復窗口
     * 在不破壞 DOS 3.3 基線下，逐步引入更細的 read 行為
+
+## 44. Disk II 讀取幾何可獨立於 nibble 長度，並在 seek/load 時重置相位 (2026-03-16)
+* **目標**：
+  * 為保護或特殊 loader 研究保留「表觀一圈長度」與實際 nibble bytes 脫鉤的能力，同時避免跨磁軌殘留的旋轉相位污染讀取結果。
+* **實作**：
+  * 在 `apple2-core/src/nibble.rs` 的 `TrackData` 加入 `read_length`，預設與 nibblized track 實際長度相同。
+  * 在 `apple2-core/src/disk2.rs` 新增 `read_rotation_accumulator`，讓 `read_length > length` 時可用分數式方式放慢 byte index 前進。
+  * 抽出 `reset_rotation_state()`，在 `load_disk()`、`reset()`，以及 stepper 真正跨到新 track 時清掉 `byte_index`、bit-phase、shift register 與 rotation accumulator。
+* **測試**：
+  * `apple2-core/src/disk2_test.rs` 新增：
+    * `read_only_geometry_can_stretch_rotation_without_changing_track_length`
+    * `seek_to_new_track_resets_read_rotation_phase`
+  * `cargo test -p apple2-core disk2_test -- --nocapture`：通過
+  * `cargo check -p apple2-desktop`：通過
+* **目前定性**：
+  * 這仍然是工程上的保守近似，不是完整 weak-bit / variable-density / P6 模型。
+  * 但已能安全地做讀取幾何實驗，而不會把上一條磁軌的相位狀態帶進下一條。

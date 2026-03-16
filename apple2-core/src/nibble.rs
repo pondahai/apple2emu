@@ -13,6 +13,7 @@ pub const PHYS_TO_LOGICAL: [usize; 16] = [0, 7, 14, 6, 13, 5, 12, 4, 11, 3, 10, 
 pub struct TrackData {
     pub raw_bytes: [u8; 6656],
     pub length: usize,
+    pub read_length: usize,
 }
 
 impl TrackData {
@@ -20,6 +21,7 @@ impl TrackData {
         Self {
             raw_bytes: [0; 6656],
             length: 0,
+            read_length: 0,
         }
     }
     pub fn push(&mut self, val: u8) {
@@ -133,6 +135,7 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
                 track_out.push(0xFF);
             }
         }
+        track_out.read_length = track_out.length;
         tracks.push(track_out);
     }
     tracks

@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::path::PathBuf;
+use std::{env, fmt::Write as _};
 
 use apple2_core::machine::Apple2Machine;
 use apple2_core::nibble::TrackData;
@@ -70,6 +71,38 @@ fn dump_ram(machine: &Apple2Machine, start: usize, len: usize) {
     println!();
 }
 
+fn peek_byte(machine: &Apple2Machine, addr: u16) -> u8 {
+    match addr {
+        0x0000..=0xBFFF => machine.mem.ram[addr as usize],
+        0xD000..=0xFFFF => machine.mem.rom[(addr - 0xD000) as usize],
+        _ => 0,
+    }
+}
+
+fn peek_word(machine: &Apple2Machine, addr: u16) -> u16 {
+    let lo = peek_byte(machine, addr) as u16;
+    let hi = peek_byte(machine, addr.wrapping_add(1)) as u16;
+    (hi << 8) | lo
+}
+
+fn classify_control_transfer(machine: &Apple2Machine, from: u16, to: u16) -> &'static str {
+    let opcode = peek_byte(machine, from);
+    let brk_vector = peek_word(machine, 0xFFFE);
+    let reset_vector = peek_word(machine, 0xFFFC);
+
+    if opcode == 0x00 && to == brk_vector {
+        "brk_vector"
+    } else if opcode == 0x4C {
+        "jmp_abs"
+    } else if opcode == 0x6C {
+        "jmp_ind"
+    } else if to == reset_vector {
+        "reset_vector"
+    } else {
+        "other"
+    }
+}
+
 fn dump_track_prologues(track: &TrackData, track_num: usize, limit: usize) {
     let mut found = 0usize;
     println!("track {} prologues:", track_num);
@@ -116,6 +149,49 @@ fn nearest_prologue_distance(track: &TrackData, idx: usize) -> usize {
     best
 }
 
+fn encode_4x4(val: u8) -> (u8, u8) {
+    ((val >> 1) | 0xAA, val | 0xAA)
+}
+
+fn patch_address_field_volume(track: &mut TrackData, volume: u8) {
+    for i in 0..track.length {
+        if track.raw_bytes[i] == 0xD5
+            && track.raw_bytes[(i + 1) % track.length] == 0xAA
+            && track.raw_bytes[(i + 2) % track.length] == 0x96
+        {
+            let trk = ((track.raw_bytes[(i + 5) % track.length] << 1) | 1)
+                & track.raw_bytes[(i + 6) % track.length];
+            let sec = ((track.raw_bytes[(i + 7) % track.length] << 1) | 1)
+                & track.raw_bytes[(i + 8) % track.length];
+            let chk = volume ^ trk ^ sec;
+            let (v1, v2) = encode_4x4(volume);
+            let (c1, c2) = encode_4x4(chk);
+            track.raw_bytes[(i + 3) % track.length] = v1;
+            track.raw_bytes[(i + 4) % track.length] = v2;
+            track.raw_bytes[(i + 9) % track.length] = c1;
+            track.raw_bytes[(i + 10) % track.length] = c2;
+        }
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    match env::var(name) {
+        Ok(val) => matches!(val.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"),
+        Err(_) => false,
+    }
+}
+
+fn env_u32(name: &str, default: u32) -> u32 {
+    env::var(name)
+        .ok()
+        .and_then(|val| val.parse::<u32>().ok())
+        .unwrap_or(default)
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    env::var(name).ok().and_then(|val| val.parse::<usize>().ok())
+}
+
 fn main() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -133,6 +209,30 @@ fn main() {
     machine.load_rom(&main_rom[main_rom.len() - 12_288..]);
     machine.mem.disk2.load_boot_rom(&disk_rom);
     machine.mem.disk2.load_disk(&disk);
+    let patch_volume_zero = env_flag("GOONIES_PATCH_VOLUME_ZERO");
+    let stretch_track23_read_len = env_flag("GOONIES_STRETCH_TRACK23_READLEN");
+    let max_steps = env_u32("GOONIES_MAX_STEPS", 2_000_000);
+    let track23_read_len_override = env_usize("GOONIES_TRACK23_READLEN");
+
+    if let Some(track) = machine.mem.disk2.tracks.get_mut(23) {
+        if let Some(read_len) = track23_read_len_override {
+            track.read_length = read_len;
+        } else if stretch_track23_read_len {
+            track.read_length = track.raw_bytes.len();
+        }
+    }
+    if patch_volume_zero {
+        for track in &mut machine.mem.disk2.tracks {
+            patch_address_field_volume(track, 0x00);
+        }
+    }
+    println!(
+        "probe options: patch_volume_zero={} stretch_track23_read_len={} track23_read_len_override={:?} max_steps={}",
+        patch_volume_zero,
+        stretch_track23_read_len,
+        track23_read_len_override,
+        max_steps
+    );
     machine.power_on();
     dump_track_prologues(&machine.mem.disk2.tracks[23], 23, 16);
 
@@ -156,13 +256,71 @@ fn main() {
     let mut post_seek_logs = 0u32;
     let mut dumped_0400_state = false;
     let mut stepper_logs = 0u32;
+    let mut decision_logs = 0u32;
+    let mut retry_logs = 0u32;
+    let mut read0318_logs = 0u32;
+    let mut patch028e_logs = 0u32;
+    let mut enter0400_logs = 0u32;
+    let mut fail0318_logs = 0u32;
+    let mut enter_faxx_logged = false;
+    let mut high_jump_logs = 0u32;
+    let mut seen_0400_consumer = false;
+    let mut watch_4c_logs = 0u32;
+    let mut call0300_logs = 0u32;
+    let mut path05a0_logs = 0u32;
+    let mut prev_4c_window = [0u8; 0x80];
 
-    for step in 0..2_000_000u32 {
+    prev_4c_window.copy_from_slice(&machine.mem.ram[0x4C00..0x4C80]);
+
+    for step in 0..max_steps {
         let pc_before = machine.cpu.pc;
         let cycles_before = machine.total_cycles;
         let track_before = machine.mem.disk2.current_track;
         let idx_before = machine.mem.disk2.byte_index;
         let cycles = machine.step();
+
+        if seen_0400_consumer && watch_4c_logs < 32 {
+            let current_4c = &machine.mem.ram[0x4C00..0x4C80];
+            let mut changed_offsets = String::new();
+            let mut change_count = 0usize;
+            let mut any_nonzero = false;
+
+            for (idx, (&before, &after)) in prev_4c_window.iter().zip(current_4c.iter()).enumerate() {
+                if after != 0 {
+                    any_nonzero = true;
+                }
+                if before != after && change_count < 8 {
+                    if !changed_offsets.is_empty() {
+                        changed_offsets.push(' ');
+                    }
+                    let _ = write!(changed_offsets, "{:02X}:{:02X}->{:02X}", idx, before, after);
+                    change_count += 1;
+                }
+            }
+
+            if change_count > 0 {
+                println!(
+                    "write_4c pc={:04X}->{:04X} a={:02X} x={:02X} y={:02X} sp={:02X} p={:02X} nonzero={} qtr={} track={} idx={} latch={:02X}",
+                    pc_before,
+                    machine.cpu.pc,
+                    machine.cpu.a,
+                    machine.cpu.x,
+                    machine.cpu.y,
+                    machine.cpu.sp,
+                    machine.cpu.status.to_byte(),
+                    any_nonzero,
+                    machine.mem.disk2.current_qtr_track,
+                    machine.mem.disk2.current_track,
+                    machine.mem.disk2.byte_index,
+                    machine.mem.disk2.data_latch
+                );
+                println!("write_4c_changes {}", changed_offsets);
+                dump_ram(&machine, 0x4C00, 0x80);
+                watch_4c_logs += 1;
+            }
+
+            prev_4c_window.copy_from_slice(current_4c);
+        }
 
         if machine.cpu.pc == last_pc {
             same_pc_count += 1;
@@ -271,6 +429,79 @@ fn main() {
             path_059x_logs += 1;
         }
 
+        if matches!(
+            pc_before,
+            0x0535
+                | 0x0538
+                | 0x053B
+                | 0x0540
+                | 0x0547
+                | 0x0553
+                | 0x055C
+                | 0x058B
+                | 0x0591
+                | 0x0596
+                | 0x059A
+                | 0x05A0
+                | 0x05AA
+                | 0x05B2
+                | 0x05BA
+                | 0x05CD
+                | 0x05D4
+        ) && track_before == 23
+            && decision_logs < 220
+        {
+            let sector_index = machine.mem.ram[0x026E] as usize;
+            let expected_sector = machine.mem.ram[0x027E + sector_index];
+            println!(
+                "decision pc={:04X} next={:04X} a={:02X} x={:02X} y={:02X} p={:02X} c={} e4={:02X} e5={:02X} e6={:02X} e7={:02X} e8={:02X} e9={:02X} 0269={:02X} 026c={:02X} 026e={:02X} exp_sec={:02X} 028e={:02X} idx={} latch={:02X}",
+                pc_before,
+                machine.cpu.pc,
+                machine.cpu.a,
+                machine.cpu.x,
+                machine.cpu.y,
+                machine.cpu.status.to_byte(),
+                machine.cpu.status.c as u8,
+                machine.mem.ram[0x00E4],
+                machine.mem.ram[0x00E5],
+                machine.mem.ram[0x00E6],
+                machine.mem.ram[0x00E7],
+                machine.mem.ram[0x00E8],
+                machine.mem.ram[0x00E9],
+                machine.mem.ram[0x0269],
+                machine.mem.ram[0x026C],
+                machine.mem.ram[0x026E],
+                expected_sector,
+                machine.mem.ram[0x028E],
+                machine.mem.disk2.byte_index,
+                machine.mem.disk2.data_latch
+            );
+            decision_logs += 1;
+        }
+
+        if pc_before == 0x059A && track_before == 23 && retry_logs < 80 {
+            let sector_index = machine.mem.ram[0x026E] as usize;
+            let expected_sector = machine.mem.ram[0x027E + sector_index];
+            println!(
+                "retry059A next={:04X} c={} decoded(vol/trk/sec/chk)={:02X}/{:02X}/{:02X}/{:02X} expected(vol/trk/sec)={:02X}/{:02X}/{:02X} 0269={:02X} 026e={:02X} 028e={:02X} idx={} qtr={}",
+                machine.cpu.pc,
+                machine.cpu.status.c as u8,
+                machine.mem.ram[0x00E9],
+                machine.mem.ram[0x00E8],
+                machine.mem.ram[0x00E7],
+                machine.mem.ram[0x00E6],
+                machine.mem.ram[0x026C],
+                machine.mem.ram[0x028E],
+                expected_sector,
+                machine.mem.ram[0x0269],
+                machine.mem.ram[0x026E],
+                machine.mem.ram[0x028E],
+                machine.mem.disk2.byte_index,
+                machine.mem.disk2.current_qtr_track
+            );
+            retry_logs += 1;
+        }
+
         if pc_before == 0x03CB && track_before == 23 && ret_0318_logs < 80 {
             println!(
                 "ret0318 next={:04X} carry={} a={:02X} x={:02X} y={:02X} p={:02X} e4={:02X} e6={:02X} e7={:02X} e8={:02X} e9={:02X} 028E={:02X} 028Ebit={:02X} idx={} latch={:02X}",
@@ -291,6 +522,117 @@ fn main() {
                 machine.mem.disk2.data_latch
             );
             ret_0318_logs += 1;
+        }
+
+        if pc_before == 0x03CB && track_before == 23 && read0318_logs < 80 {
+            let mut sector_head = String::new();
+            for i in 0..16usize {
+                if i != 0 {
+                    sector_head.push(' ');
+                }
+                let _ = write!(sector_head, "{:02X}", machine.mem.ram[0x0200 + i]);
+            }
+            let mut zp_head = String::new();
+            for addr in [0x00E0usize, 0x00E1, 0x00E2, 0x00E3, 0x00E4, 0x00E5, 0x00E6, 0x00E7, 0x00E8, 0x00E9] {
+                if !zp_head.is_empty() {
+                    zp_head.push(' ');
+                }
+                let _ = write!(zp_head, "{:02X}", machine.mem.ram[addr]);
+            }
+            println!(
+                "read0318 next={:04X} carry={} sector[0200..020F]={} zp[e0..e9]={} idx={} qtr={}",
+                machine.cpu.pc,
+                machine.cpu.status.c as u8,
+                sector_head,
+                zp_head,
+                machine.mem.disk2.byte_index,
+                machine.mem.disk2.current_qtr_track
+            );
+            read0318_logs += 1;
+        }
+
+        if pc_before == 0x0300 && call0300_logs < 80 {
+            let dest = machine.mem.ram[0x00F8] as u16 | ((machine.mem.ram[0x00F9] as u16) << 8);
+            println!(
+                "call0300 next={:04X} a={:02X} x={:02X} y={:02X} sp={:02X} p={:02X} f8={:02X} f9={:02X} dest={:04X} b8[0..15]={:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+                machine.cpu.pc,
+                machine.cpu.a,
+                machine.cpu.x,
+                machine.cpu.y,
+                machine.cpu.sp,
+                machine.cpu.status.to_byte(),
+                machine.mem.ram[0x00F8],
+                machine.mem.ram[0x00F9],
+                dest,
+                machine.mem.ram[0xB800],
+                machine.mem.ram[0xB801],
+                machine.mem.ram[0xB802],
+                machine.mem.ram[0xB803],
+                machine.mem.ram[0xB804],
+                machine.mem.ram[0xB805],
+                machine.mem.ram[0xB806],
+                machine.mem.ram[0xB807],
+                machine.mem.ram[0xB808],
+                machine.mem.ram[0xB809],
+                machine.mem.ram[0xB80A],
+                machine.mem.ram[0xB80B],
+                machine.mem.ram[0xB80C],
+                machine.mem.ram[0xB80D],
+                machine.mem.ram[0xB80E],
+                machine.mem.ram[0xB80F]
+            );
+            call0300_logs += 1;
+        }
+
+        if matches!(pc_before, 0x059D | 0x059E | 0x05A0 | 0x05A2 | 0x05A5)
+            && track_before == 23
+            && path05a0_logs < 120
+        {
+            println!(
+                "path05a0 pc={:04X} next={:04X} a={:02X} x={:02X} y={:02X} sp={:02X} p={:02X} e0={:02X} f8={:02X} f9={:02X} 028e={:02X} idx={} latch={:02X}",
+                pc_before,
+                machine.cpu.pc,
+                machine.cpu.a,
+                machine.cpu.x,
+                machine.cpu.y,
+                machine.cpu.sp,
+                machine.cpu.status.to_byte(),
+                machine.mem.ram[0x00E0],
+                machine.mem.ram[0x00F8],
+                machine.mem.ram[0x00F9],
+                machine.mem.ram[0x028E],
+                machine.mem.disk2.byte_index,
+                machine.mem.disk2.data_latch
+            );
+            path05a0_logs += 1;
+        }
+
+        if matches!(pc_before, 0x0366 | 0x0370 | 0x037A) && track_before == 23 && fail0318_logs < 120 {
+            let reason = match pc_before {
+                0x0366 => "checksum_cmp",
+                0x0370 => "epilogue_de",
+                0x037A => "epilogue_aa",
+                _ => unreachable!(),
+            };
+            println!(
+                "fail0318 kind={} next={:04X} a={:02X} x={:02X} y={:02X} p={:02X} cmp_target={:02X} e0={:02X} e4={:02X} e6={:02X} e7={:02X} e8={:02X} e9={:02X} idx={} latch={:02X}",
+                reason,
+                machine.cpu.pc,
+                machine.cpu.a,
+                machine.cpu.x,
+                machine.cpu.y,
+                machine.cpu.status.to_byte(),
+                machine.mem.ram[0x0200 + machine.cpu.y as usize],
+                machine.mem.ram[0x00E0],
+                machine.mem.ram[0x00E4],
+                machine.mem.ram[0x00E6],
+                machine.mem.ram[0x00E7],
+                machine.mem.ram[0x00E8],
+                machine.mem.ram[0x00E9],
+                machine.mem.disk2.byte_index,
+                machine.mem.disk2.data_latch
+            );
+            fail0318_logs += 1;
         }
 
         if matches!(
@@ -335,6 +677,65 @@ fn main() {
                 machine.mem.disk2.byte_index
             );
             path_0400_logs += 1;
+        }
+
+        if matches!(pc_before, 0x05BA | 0x05BC | 0x05BF | 0x05C2 | 0x05C5 | 0x05C7)
+            && track_before == 23
+            && patch028e_logs < 120
+        {
+            let mut table = String::new();
+            for i in 0..16usize {
+                if i != 0 {
+                    table.push(' ');
+                }
+                let _ = write!(table, "{:02X}", machine.mem.ram[0x028E + i]);
+            }
+            println!(
+                "patch028e pc={:04X} next={:04X} a={:02X} x={:02X} y={:02X} e4={:02X} 028e..029d={}",
+                pc_before,
+                machine.cpu.pc,
+                machine.cpu.a,
+                machine.cpu.x,
+                machine.cpu.y,
+                machine.mem.ram[0x00E4],
+                table
+            );
+            patch028e_logs += 1;
+        }
+
+        if pc_before == 0x0400 && track_before == 23 && enter0400_logs < 80 {
+            seen_0400_consumer = true;
+            let mut sector_head = String::new();
+            for i in 0..32usize {
+                if i != 0 {
+                    sector_head.push(' ');
+                }
+                let _ = write!(sector_head, "{:02X}", machine.mem.ram[0x0200 + i]);
+            }
+            let mut table = String::new();
+            for i in 0..16usize {
+                if i != 0 {
+                    table.push(' ');
+                }
+                let _ = write!(table, "{:02X}", machine.mem.ram[0x028E + i]);
+            }
+            println!(
+                "enter0400 a={:02X} x={:02X} y={:02X} p={:02X} e0={:02X} e4={:02X} e7={:02X} e8={:02X} e9={:02X} 0269={:02X} 026e={:02X} 028e..029d={} sector[0200..021f]={}",
+                machine.cpu.a,
+                machine.cpu.x,
+                machine.cpu.y,
+                machine.cpu.status.to_byte(),
+                machine.mem.ram[0x00E0],
+                machine.mem.ram[0x00E4],
+                machine.mem.ram[0x00E7],
+                machine.mem.ram[0x00E8],
+                machine.mem.ram[0x00E9],
+                machine.mem.ram[0x0269],
+                machine.mem.ram[0x026E],
+                table,
+                sector_head
+            );
+            enter0400_logs += 1;
         }
 
         if matches!(
@@ -478,6 +879,75 @@ fn main() {
             dump_ram(&machine, 0x0450, 0x40);
             dump_ram(&machine, 0x0500, 0x100);
             dump_ram(&machine, 0x0800, 0x40);
+        }
+
+        if !enter_faxx_logged && (0xFA00..=0xFAFF).contains(&machine.cpu.pc) {
+            enter_faxx_logged = true;
+            let opcode = peek_byte(&machine, pc_before);
+            let op1 = peek_byte(&machine, pc_before.wrapping_add(1));
+            let op2 = peek_byte(&machine, pc_before.wrapping_add(2));
+            println!(
+                "enter_faxx from={:04X} to={:04X} kind={} opcode={:02X} ops={:02X} {:02X} a={:02X} x={:02X} y={:02X} sp={:02X} p={:02X} qtr={} track={} idx={} latch={:02X}",
+                pc_before,
+                machine.cpu.pc,
+                classify_control_transfer(&machine, pc_before, machine.cpu.pc),
+                opcode,
+                op1,
+                op2,
+                machine.cpu.a,
+                machine.cpu.x,
+                machine.cpu.y,
+                machine.cpu.sp,
+                machine.cpu.status.to_byte(),
+                machine.mem.disk2.current_qtr_track,
+                machine.mem.disk2.current_track,
+                machine.mem.disk2.byte_index,
+                machine.mem.disk2.data_latch
+            );
+            let stack_base = 0x0100usize + machine.cpu.sp as usize;
+            let start = stack_base.saturating_sub(8).max(0x0100);
+            let len = (0x01FFusize - start).min(24);
+            dump_ram(&machine, start, len);
+            dump_ram(&machine, 0x00E0, 0x20);
+            dump_ram(&machine, 0x0200, 0x40);
+            dump_ram(&machine, 0x0280, 0x40);
+        }
+
+        if seen_0400_consumer
+            && high_jump_logs < 64
+            && !matches!(pc_before, 0xFA00..=0xFFFF)
+            && matches!(machine.cpu.pc, 0xF800..=0xFFFF)
+        {
+            let opcode = peek_byte(&machine, pc_before);
+            let op1 = peek_byte(&machine, pc_before.wrapping_add(1));
+            let op2 = peek_byte(&machine, pc_before.wrapping_add(2));
+            println!(
+                "high_jump from={:04X} to={:04X} kind={} opcode={:02X} ops={:02X} {:02X} a={:02X} x={:02X} y={:02X} sp={:02X} p={:02X} qtr={} track={} idx={} latch={:02X}",
+                pc_before,
+                machine.cpu.pc,
+                classify_control_transfer(&machine, pc_before, machine.cpu.pc),
+                opcode,
+                op1,
+                op2,
+                machine.cpu.a,
+                machine.cpu.x,
+                machine.cpu.y,
+                machine.cpu.sp,
+                machine.cpu.status.to_byte(),
+                machine.mem.disk2.current_qtr_track,
+                machine.mem.disk2.current_track,
+                machine.mem.disk2.byte_index,
+                machine.mem.disk2.data_latch
+            );
+            dump_ram(&machine, 0x00E0, 0x20);
+            dump_ram(&machine, 0x0200, 0x40);
+            dump_ram(&machine, 0x0280, 0x40);
+            dump_ram(&machine, 0x0400, 0x80);
+            if pc_before >= 0x0200 {
+                let region_start = pc_before.saturating_sub(0x20) as usize;
+                dump_ram(&machine, region_start, 0x60);
+            }
+            high_jump_logs += 1;
         }
 
         if same_pc_count >= 100_000 {

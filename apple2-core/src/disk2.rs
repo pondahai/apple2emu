@@ -20,6 +20,7 @@ pub struct Disk2 {
     pub data_latch: u8,
     pub read_shift_register: u8,
     pub read_bit_phase: u8,
+    pub read_rotation_accumulator: usize,
     pub write_ready: bool,
     pub write_bit_phase: u8,
 }
@@ -46,6 +47,7 @@ impl Disk2 {
             data_latch: 0,
             read_shift_register: 0,
             read_bit_phase: 0,
+            read_rotation_accumulator: 0,
             write_ready: false,
             write_bit_phase: 0,
         }
@@ -60,6 +62,7 @@ impl Disk2 {
         if disk_data.len() == 143360 {
             self.tracks = nibblize_dsk(disk_data).into();
             self.is_disk_loaded = true;
+            self.reset_rotation_state();
         }
     }
 
@@ -182,7 +185,11 @@ impl Disk2 {
         }
 
         self.current_qtr_track = target_qtr.clamp(0, 34 * 4);
-        self.current_track = (self.current_qtr_track / 4) as usize;
+        let next_track = (self.current_qtr_track / 4) as usize;
+        if next_track != self.current_track {
+            self.current_track = next_track;
+            self.reset_rotation_state();
+        }
     }
 
     pub fn tick(&mut self, cycles: u32) {
@@ -225,11 +232,13 @@ impl Disk2 {
 
                     self.read_bit_phase += 1;
                     if self.read_bit_phase >= 8 {
+                        let track_length = track.length;
+                        let read_length = track.read_length;
                         self.read_bit_phase = 0;
                         if (self.read_shift_register & 0x80) != 0 {
                             self.data_latch = self.read_shift_register;
                         }
-                        self.byte_index = (self.byte_index + 1) % track.length;
+                        self.advance_read_rotation(track_length, read_length);
                     }
                 }
             } else {
@@ -237,25 +246,51 @@ impl Disk2 {
                     self.cycles_accumulator -= 32;
                     let track = &mut self.tracks[self.current_track];
                     if track.length > 0 {
-                        // Other non-read states only advance rotational position.
-                        self.byte_index = (self.byte_index + 1) % track.length;
+                        let track_length = track.length;
+                        let read_length = track.read_length;
+                        // Non-write states still rotate the disk, but read-only geometry
+                        // can stretch the apparent revolution length without changing bytes.
+                        self.advance_read_rotation(track_length, read_length);
                     }
                 }
             }
         }
     }
 
+    fn advance_read_rotation(&mut self, actual_length: usize, read_length: usize) {
+        if actual_length == 0 {
+            return;
+        }
+
+        let effective_read_length = if read_length == 0 { actual_length } else { read_length };
+        if effective_read_length <= actual_length {
+            self.byte_index = (self.byte_index + 1) % actual_length;
+            return;
+        }
+
+        self.read_rotation_accumulator += actual_length;
+        if self.read_rotation_accumulator >= effective_read_length {
+            self.read_rotation_accumulator -= effective_read_length;
+            self.byte_index = (self.byte_index + 1) % actual_length;
+        }
+    }
+
+    fn reset_rotation_state(&mut self) {
+        self.byte_index = 0;
+        self.read_shift_register = 0;
+        self.read_bit_phase = 0;
+        self.read_rotation_accumulator = 0;
+        self.write_bit_phase = 0;
+    }
+
     pub fn reset(&mut self) {
         self.motor_on = false;
         self.current_track = 0;
-        self.byte_index = 0;
         self.cycles_accumulator = 0;
         self.data_latch = 0;
-        self.read_shift_register = 0;
-        self.read_bit_phase = 0;
         self.write_ready = false;
-        self.write_bit_phase = 0;
         self.phases = [false; 4];
         self.current_qtr_track = 0;
+        self.reset_rotation_state();
     }
 }

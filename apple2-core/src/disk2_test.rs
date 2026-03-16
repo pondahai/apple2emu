@@ -110,4 +110,49 @@ mod tests {
         disk.tick(28);
         assert_eq!(disk.data_latch, 0xFF);
     }
+
+    #[test]
+    fn read_only_geometry_can_stretch_rotation_without_changing_track_length() {
+        let mut disk = Disk2::new();
+        disk.is_disk_loaded = true;
+        disk.current_track = 0;
+        disk.tracks[0].length = 2;
+        disk.tracks[0].read_length = 4;
+        disk.tracks[0].raw_bytes[0] = 0xD5;
+        disk.tracks[0].raw_bytes[1] = 0xAA;
+
+        disk.write_io(0xC0E9, 0); // Motor on
+        disk.write_io(0xC0EC, 0); // Q6 = 0
+        disk.write_io(0xC0EE, 0); // Q7 = 0 (read mode)
+
+        disk.tick(32);
+        assert_eq!(disk.byte_index, 0);
+
+        disk.tick(32);
+        assert_eq!(disk.byte_index, 1);
+    }
+
+    #[test]
+    fn seek_to_new_track_resets_read_rotation_phase() {
+        let mut disk = Disk2::new();
+        disk.is_disk_loaded = true;
+        disk.current_qtr_track = 3;
+        disk.current_track = 0;
+        disk.phases[1] = true;
+        disk.phases[2] = true;
+        disk.byte_index = 1;
+        disk.read_bit_phase = 3;
+        disk.read_shift_register = 0x5A;
+        disk.read_rotation_accumulator = 2;
+        disk.write_bit_phase = 4;
+
+        disk.write_io(0xC0E2, 0); // phase 1 off, leave phase 2 on -> quarter track 4
+
+        assert_eq!(disk.current_track, 1);
+        assert_eq!(disk.byte_index, 0);
+        assert_eq!(disk.read_bit_phase, 0);
+        assert_eq!(disk.read_shift_register, 0);
+        assert_eq!(disk.read_rotation_accumulator, 0);
+        assert_eq!(disk.write_bit_phase, 0);
+    }
 }
