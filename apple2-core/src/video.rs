@@ -60,7 +60,7 @@ impl Video {
     /// Render the Apple II Text Mode frame into the 32-bit framebuffer.
     /// Needs a character ROM font to actually draw the letters.
     pub fn render_text_frame(&mut self, mem: &Apple2Memory, char_rom: &[u8; 2048]) {
-        let green_color = 0x00_00_FF_00; // ARGB Green
+        let white_color = 0x00_FF_FF_FF; // ARGB White
         let black_color = 0x00_00_00_00; // ARGB Black
 
         let is_blink_on = (std::time::SystemTime::now()
@@ -112,8 +112,7 @@ impl Video {
                             pixel_on = !pixel_on;
                         }
 
-                        let color = if pixel_on { green_color } else { black_color };
-
+                        let color = if pixel_on { white_color } else { black_color };
                         self.frame_buffer[screen_y * SCREEN_WIDTH + screen_x] = color;
                     }
                 }
@@ -153,7 +152,7 @@ impl Video {
             .as_millis()
             % 533)
             > 266;
-        let green_color = 0x00_00_FF_00; // ARGB Green
+        let white_color = 0x00_FF_FF_FF; // ARGB White
         let black_color = 0x00_00_00_00; // ARGB Black
 
         for row in 0..24 {
@@ -184,7 +183,7 @@ impl Video {
                             if invert_colors {
                                 pixel_on = !pixel_on;
                             }
-                            let color = if pixel_on { green_color } else { black_color };
+                            let color = if pixel_on { white_color } else { black_color };
                             self.frame_buffer[screen_y * SCREEN_WIDTH + screen_x] = color;
                         }
                     }
@@ -240,11 +239,10 @@ impl Video {
             .as_millis()
             % 533)
             > 266;
-        let green_color = 0x00_00_FF_00; // ARGB Green
+        let white_color = 0x00_FF_FF_FF; // ARGB White
         let black_color = 0x00_00_00_00; // ARGB Black
 
         // Hi-Res Colors (approximate ARGB)
-        let white_color = 0xFF_FF_FF_FF;
         let black_color_hr = 0xFF_00_00_00;
         let green_color_hr = 0xFF_1E_D6_00; // Light Green
         let purple_color_hr = 0xFF_D3_59_D6; // Purple
@@ -279,7 +277,7 @@ impl Video {
                         if invert_colors {
                             pixel_on = !pixel_on;
                         }
-                        let color = if pixel_on { green_color } else { black_color };
+                        let color = if pixel_on { white_color } else { black_color };
                         self.frame_buffer[screen_y * SCREEN_WIDTH + screen_x] = color;
                     }
                 }
