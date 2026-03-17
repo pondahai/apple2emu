@@ -140,3 +140,153 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
     }
     tracks
 }
+
+pub fn denibblize_dsk(tracks: &[TrackData]) -> Result<alloc::vec::Vec<u8>, alloc::string::String> {
+    let mut out = alloc::vec![0u8; 35 * 16 * 256];
+    
+    let mut read_table = [0xFFu8; 256];
+    for (i, &val) in NIBBLE_WRITE_TABLE.iter().enumerate() {
+        read_table[val as usize] = i as u8;
+    }
+
+    let decode4x4 = |v1: u8, v2: u8| -> u8 {
+        ((v1 & 0x55) << 1) | (v2 & 0x55)
+    };
+
+    let swap2 = |b: u8| -> u8 { ((b & 0x01) << 1) | ((b & 0x02) >> 1) };
+
+    for (track_num, track) in tracks.iter().enumerate() {
+        if track.length == 0 {
+            continue;
+        }
+        let data = &track.raw_bytes[..track.length];
+        
+        let mut sectors_found = [false; 16];
+        let mut scan_idx = 0;
+        let max_scan = track.length * 2;
+        
+        while scan_idx < max_scan {
+            let i_mod = scan_idx % track.length;
+            let i1_mod = (scan_idx + 1) % track.length;
+            let i2_mod = (scan_idx + 2) % track.length;
+            
+            if data[i_mod] == 0xD5 && data[i1_mod] == 0xAA && data[i2_mod] == 0x96 {
+                let get_byte = |offset: usize| data[(scan_idx + offset) % track.length];
+                
+                let vol = decode4x4(get_byte(3), get_byte(4));
+                let trk = decode4x4(get_byte(5), get_byte(6));
+                let sec = decode4x4(get_byte(7), get_byte(8));
+                let chk = decode4x4(get_byte(9), get_byte(10));
+                
+                if (vol ^ trk ^ sec) != chk || sec >= 16 {
+                    if track_num == 0 {
+                        std::println!("Header fail: vol={}, trk={}, sec={}, chk={}", vol, trk, sec, chk);
+                    }
+                    scan_idx += 1;
+                    continue;
+                }
+                
+                if sectors_found[sec as usize] {
+                    scan_idx += 14;
+                    continue;
+                }
+                
+                let mut data_idx = scan_idx + 14;
+                let mut found_data = false;
+                for j in data_idx..data_idx + 60 {
+                    let j0 = j % track.length;
+                    let j1 = (j + 1) % track.length;
+                    let j2 = (j + 2) % track.length;
+                    if data[j0] == 0xD5 && data[j1] == 0xAA && data[j2] == 0xAD {
+                        found_data = true;
+                        data_idx = j + 3;
+                        break;
+                    }
+                }
+                
+                if !found_data {
+                    if track_num == 0 {
+                        std::println!("No data prologue for sec {}", sec);
+                    }
+                    scan_idx += 14;
+                    continue;
+                }
+                
+                let mut decoded = [0u8; 342];
+                let mut last_val = 0u8;
+                let mut read_err = false;
+                
+                for k in 0..342 {
+                    let disk_val = data[(data_idx + k) % track.length];
+                    let val6_from_disk = read_table[disk_val as usize];
+                    if val6_from_disk == 0xFF {
+                        if track_num == 0 {
+                            std::println!("Invalid nibble for sec {} at byte {}", sec, k);
+                        }
+                        read_err = true;
+                        break;
+                    }
+                    decoded[k] = val6_from_disk ^ last_val;
+                    last_val = decoded[k];
+                }
+                
+                let checksum_disk = data[(data_idx + 342) % track.length];
+                let checksum_val6 = read_table[checksum_disk as usize];
+                if checksum_val6 == 0xFF || checksum_val6 != last_val {
+                    if track_num == 0 {
+                        std::println!("Checksum fail for sec {}: read {:02X}, expected {:02X}", sec, checksum_val6, last_val);
+                    }
+                    read_err = true;
+                }
+                
+                if read_err {
+                    scan_idx = data_idx;
+                    continue;
+                }
+                
+                let mut sector_data = [0u8; 256];
+                let snib = &decoded[0..86];
+                let pbuf = &decoded[86..342]; 
+                
+                for k in 0..256 {
+                    let primary = pbuf[k];
+                    let sec_idx = k % 86;
+                    let group = k / 86; 
+                    
+                    let b = match group {
+                        0 => snib[sec_idx] & 0x03,
+                        1 => (snib[sec_idx] >> 2) & 0x03,
+                        2 => (snib[sec_idx] >> 4) & 0x03,
+                        _ => 0,
+                    };
+                    
+                    let orig_b = swap2(b);
+                    sector_data[k] = (primary << 2) | orig_b;
+                }
+                
+                let logical_sector = PHYS_TO_LOGICAL[sec as usize];
+                let track_offset = track_num * 16 * 256;
+                let sector_offset = track_offset + logical_sector * 256;
+                out[sector_offset..sector_offset + 256].copy_from_slice(&sector_data);
+                
+                sectors_found[sec as usize] = true;
+                scan_idx = data_idx + 343;
+                
+                let mut all_found = true;
+                for b in &sectors_found {
+                    if !*b {
+                        all_found = false;
+                        break;
+                    }
+                }
+                if all_found {
+                    break;
+                }
+            } else {
+                scan_idx += 1;
+            }
+        }
+    }
+    
+    Ok(out)
+}

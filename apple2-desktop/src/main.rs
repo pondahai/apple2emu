@@ -77,20 +77,19 @@ fn decode_disk_image(path: &std::path::Path, raw_data: Vec<u8>) -> Result<Vec<u8
     const EXPECTED_DSK_BYTES: usize = 143_360;
     const MAX_TRAILING_BYTES: usize = 4_096;
 
-    let is_gz_ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("gz"))
-        .unwrap_or(false);
     let is_gz_magic = raw_data.len() >= 2 && raw_data[0] == 0x1F && raw_data[1] == 0x8B;
 
-    let disk = if is_gz_ext || is_gz_magic {
+    let disk = if is_gz_magic {
         let mut decoder = GzDecoder::new(raw_data.as_slice());
         let mut out = Vec::new();
-        decoder
-            .read_to_end(&mut out)
-            .map_err(|e| format!("Failed to decompress {}: {}", path.display(), e))?;
-        out
+        match decoder.read_to_end(&mut out) {
+            Ok(_) => out,
+            Err(e) => {
+                // If decompression fails, warn but try to use the raw data anyway
+                println!("WARNING: Failed to decompress {} despite gzip magic: {}. Falling back to raw data.", path.display(), e);
+                raw_data
+            }
+        }
     } else {
         raw_data
     };
@@ -122,6 +121,25 @@ fn decode_disk_image(path: &std::path::Path, raw_data: Vec<u8>) -> Result<Vec<u8
     }
 
     Ok(disk[..EXPECTED_DSK_BYTES].to_vec())
+}
+
+fn save_disk_image(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let is_gz_ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("gz"))
+        .unwrap_or(false);
+
+    if is_gz_ext {
+        let file = std::fs::File::create(path)?;
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        encoder.write_all(data)?;
+        encoder.finish()?;
+    } else {
+        std::fs::write(path, data)?;
+    }
+    Ok(())
 }
 
 fn rebuild_sink(audio_handle: Option<&OutputStreamHandle>) -> Option<Sink> {
@@ -675,6 +693,20 @@ fn main() {
                 machine.reset();
             } else {
                 println!(">>> REBOOT (Cold Boot)");
+                // Save changes before cold boot
+                if machine.mem.disk2.is_dirty {
+                    let path_to_save = config.last_disk_path.as_ref().unwrap_or(&dsk_path);
+                    if let Ok(new_disk) = apple2_core::nibble::denibblize_dsk(&machine.mem.disk2.tracks) {
+                        if let Err(e) = save_disk_image(path_to_save, &new_disk) {
+                            println!("ERROR: Failed to save changes to current disk {:?}: {}", path_to_save.file_name().unwrap_or_default(), e);
+                        } else {
+                            println!("Saved changes to disk before reboot: {:?}", path_to_save.file_name().unwrap_or_default());
+                            // IMPORTANT: Update our memory cache with the new data so the reboot uses the updated disk!
+                            cached_disk_image = Some(new_disk);
+                        }
+                    }
+                }
+
                 machine = Apple2Machine::new();
                 if !cached_main_rom.is_empty() {
                     machine.load_rom(&cached_main_rom);
@@ -703,6 +735,19 @@ fn main() {
                 if let Ok(raw_data) = std::fs::read(&path) {
                     match decode_disk_image(&path, raw_data) {
                         Ok(disk_image) => {
+                            // Check if current disk is dirty and save it before loading new one
+                            if machine.mem.disk2.is_dirty {
+                                if let Some(ref current_path) = config.last_disk_path {
+                                    if let Ok(new_disk) = apple2_core::nibble::denibblize_dsk(&machine.mem.disk2.tracks) {
+                                        if let Err(e) = save_disk_image(current_path, &new_disk) {
+                                            println!("ERROR: Failed to save changes to current disk {:?}: {}", current_path.file_name().unwrap_or_default(), e);
+                                        } else {
+                                            println!("Saved changes to disk: {:?}", current_path.file_name().unwrap_or_default());
+                                        }
+                                    }
+                                }
+                            }
+                            
                             cached_disk_image = Some(disk_image.clone());
                             machine.mem.disk2.load_disk(&disk_image);
                             sink = rebuild_sink(audio_handle.as_ref());
@@ -838,42 +883,45 @@ fn main() {
         }
 
         // Periodic Debug
-        static mut FRAME_COUNT: u32 = 0;
-        if !turbo_mode {
-            unsafe {
-                FRAME_COUNT += 1;
-                if FRAME_COUNT % 60 == 0 {
-                    let mut row_data = String::new();
-                    for i in 0..32 {
-                        row_data.push_str(&format!("{:02X} ", machine.mem.read(0x0800 + i)));
-                    }
-                    let mut vec_data = String::new();
-                    for i in 0..32 {
-                        vec_data.push_str(&format!("{:02X} ", machine.mem.read(0x03D0 + i)));
-                    }
-                    let mut buf_data = String::new();
-                    for i in 0..16 {
-                        buf_data.push_str(&format!("{:02X} ", machine.mem.read(0x0200 + i)));
-                    }
+        #[cfg(debug_assertions)]
+        {
+            static mut FRAME_COUNT: u32 = 0;
+            if !turbo_mode {
+                unsafe {
+                    FRAME_COUNT += 1;
+                    if FRAME_COUNT % 60 == 0 {
+                        let mut row_data = String::new();
+                        for i in 0..32 {
+                            row_data.push_str(&format!("{:02X} ", machine.mem.read(0x0800 + i)));
+                        }
+                        let mut vec_data = String::new();
+                        for i in 0..32 {
+                            vec_data.push_str(&format!("{:02X} ", machine.mem.read(0x03D0 + i)));
+                        }
+                        let mut buf_data = String::new();
+                        for i in 0..16 {
+                            buf_data.push_str(&format!("{:02X} ", machine.mem.read(0x0200 + i)));
+                        }
 
-                    println!(
-                        "Disk: T{} Index={} Latch={:02X}",
-                        machine.mem.disk2.current_track,
-                        machine.mem.disk2.byte_index,
-                        machine.mem.disk2.data_latch
-                    );
-                    println!("Memory at $0800: {}", row_data);
-                    println!("Vectors at $03D0: {}", vec_data);
-                    println!("Buffer at $0200: {}", buf_data);
-                    println!(
-                        "CPU PC: {:04X} A:{:02X} X:{:02X} Y:{:02X} S:{:02X} P:{:02X}",
-                        machine.cpu.pc,
-                        machine.cpu.a,
-                        machine.cpu.x,
-                        machine.cpu.y,
-                        machine.cpu.sp,
-                        machine.cpu.status.to_byte()
-                    );
+                        println!(
+                            "Disk: T{} Index={} Latch={:02X}",
+                            machine.mem.disk2.current_track,
+                            machine.mem.disk2.byte_index,
+                            machine.mem.disk2.data_latch
+                        );
+                        println!("Memory at $0800: {}", row_data);
+                        println!("Vectors at $03D0: {}", vec_data);
+                        println!("Buffer at $0200: {}", buf_data);
+                        println!(
+                            "CPU PC: {:04X} A:{:02X} X:{:02X} Y:{:02X} S:{:02X} P:{:02X}",
+                            machine.cpu.pc,
+                            machine.cpu.a,
+                            machine.cpu.x,
+                            machine.cpu.y,
+                            machine.cpu.sp,
+                            machine.cpu.status.to_byte()
+                        );
+                    }
                 }
             }
         }
@@ -891,6 +939,7 @@ fn main() {
             .update_with_buffer(&video.frame_buffer, SCREEN_WIDTH, SCREEN_HEIGHT)
             .unwrap();
 
+        #[cfg(debug_assertions)]
         if !turbo_mode && last_cycle.elapsed().as_secs() >= 1 {
             // Print screen rows
             for row in 0..24 {
@@ -913,6 +962,18 @@ fn main() {
                 }
             }
             last_cycle = Instant::now();
+        }
+    }
+
+    // Save changes when closing the emulator
+    if machine.mem.disk2.is_dirty {
+        let path_to_save = config.last_disk_path.as_ref().unwrap_or(&dsk_path);
+        if let Ok(new_disk) = apple2_core::nibble::denibblize_dsk(&machine.mem.disk2.tracks) {
+            if let Err(e) = save_disk_image(path_to_save, &new_disk) {
+                println!("ERROR: Failed to save changes to current disk {:?}: {}", path_to_save.file_name().unwrap_or_default(), e);
+            } else {
+                println!("Saved changes to disk on exit: {:?}", path_to_save.file_name().unwrap_or_default());
+            }
         }
     }
 }

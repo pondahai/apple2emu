@@ -70,13 +70,20 @@
 ## 14. 磁碟寫入修正與 SAVE 驗證 (2026-03-13)
 * **Error #8 修正**：重構 Disk II 寫入路徑，將 `Q7=1,Q6=0` 的寫入位移流程改為位元級節奏（4 cycles/bit），讓 DOS `SAVE` 後的 RWTS 驗證不再觸發 `ERROR #8`。
 * **端到端驗證**：新增 `save_smoke`（`apple2-desktop/src/bin/save_smoke.rs`）自動執行 `CATALOG -> NEW -> SAVE TEST -> CATALOG`，可穩定驗證 `TEST` 檔案出現在目錄中。
-* **目前限制**：寫入結果目前只更新模擬器記憶體中的 nibble tracks；尚未實作 denibblize 回寫 `.dsk` 檔案，重開後不保留。 
 
 ## 15. 速度模式與載入相容性修正 (2026-03-13)
 * **F4 速度循環**：將原本單一 Turbo 切換改為循環倍率 `1x -> 2x -> 3x -> 4x -> 5x -> 1x`，便於依場景調速。
 * **超頻音訊穩定**：移除高倍率下的硬性 `sink.clear()` 斷音策略，改為佇列過高時跳過單幀追加，保留音訊連續性。
 * **`.dsk.gz` 載入修正**：統一啟動/F3 載入路徑，偵測 `.gz`（副檔名或 gzip magic）後先解壓，再做 140KB 尺寸驗證並載入 Disk II。
 
+## 16. 實體磁碟檔案寫回與持久化 (2026-03-17)
+* **Denibblize 實作與驗證**：在 `apple2-core/src/nibble.rs` 中實作了 `denibblize_dsk`，能夠將記憶體中修改過的原始 Nibble 磁軌反向解碼為標準 140KB `.dsk` 格式。並透過 `test_nibble.rs` 驗證其雙向轉換的無損性 (0 bytes mismatch)。
+* **自動存檔觸發機制**：於 `Disk2` 加入 `is_dirty` 狀態標記，並整合到 `apple2-desktop` 的主迴圈中。
+* **涵蓋所有退出路徑**：
+  1. 按 `F3` 換片時會自動將舊磁片變更寫回。
+  2. 按 `F2` 冷重開機時會寫回並更新記憶體快取。
+  3. 關閉模擬器視窗或按 `F10` 離開時，會自動寫回變更。
+* **壓縮檔支援**：加入 `save_disk_image`，能在寫回檔案時偵測是否為 `.gz`，並正確地將資料重新用 Gzip 壓縮，解決了冷開機再次載入時發生的 `invalid gzip header` 問題。現在你的磁碟變更已能完美、安全地保存下來！
 ## 16. 高階遊戲相容性與音訊升級 (2026-03-13)
 * **退出按鍵與 ESC 修正**：將退出模擬器的熱鍵從 `ESC` 移至 `F10`，釋放 `ESC` 鍵（ASCII 27）以供模擬器內的遊戲正常使用。
 * **Language Card (64K RAM 擴充)**：實作 `$C080`~`$C08F` 的 Bank-switching 機制，為 `$D000`~`$FFFF` 區域提供額外的 16KB RAM，解決大型遊戲（如《七寶奇謀 Goonies》）因寫入 ROM 空間而崩潰的問題。

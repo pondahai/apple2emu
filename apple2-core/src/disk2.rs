@@ -30,6 +30,7 @@ pub struct Disk2 {
     pub pending_read_latch: Option<u8>,
     pub write_ready: bool,
     pub write_bit_phase: u8,
+    pub is_dirty: bool,
 }
 
 impl Disk2 {
@@ -64,6 +65,7 @@ impl Disk2 {
             pending_read_latch: None,
             write_ready: false,
             write_bit_phase: 0,
+            is_dirty: false,
         }
     }
 
@@ -252,6 +254,7 @@ impl Disk2 {
                     } else {
                         track.raw_bytes[self.byte_index] &= !(1 << bit_pos);
                     }
+                    self.is_dirty = true;
                     self.write_bit_phase += 1;
                     if self.write_bit_phase >= 8 {
                         self.write_bit_phase = 0;
