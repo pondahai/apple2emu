@@ -355,6 +355,9 @@ fn main() {
     let mut last_f2_down = false;
     let mut last_f3_down = false;
     let mut last_f4_down = false;
+    let mut last_right_mouse_down = false;
+    let mut clipboard = arboard::Clipboard::new().ok();
+    
     let mut speed_multiplier: u32 = 1;
     let mut dc_filter_x1: f32 = 0.0;
     let mut dc_filter_y1: f32 = 0.0;
@@ -816,6 +819,29 @@ fn main() {
             println!(">>> Speed Mode: CPU x{}", speed_multiplier);
         }
         last_f4_down = f4_down;
+
+        // Clipboard Paste on Right Click
+        let right_mouse_down = window.get_mouse_down(minifb::MouseButton::Right);
+        if right_mouse_down && !last_right_mouse_down {
+            if let Some(ref mut cb) = clipboard {
+                if let Ok(text) = cb.get_text() {
+                    println!(">>> Pasting {} characters from clipboard...", text.len());
+                    for c in text.chars() {
+                        let mut ascii = c as u32;
+                        if ascii == 10 { // LF -> CR
+                            ascii = 13;
+                        }
+                        if ascii >= 97 && ascii <= 122 { // lowercase -> uppercase
+                            ascii -= 32;
+                        }
+                        if ascii < 128 {
+                            key_queue.push_back(ascii as u8);
+                        }
+                    }
+                }
+            }
+        }
+        last_right_mouse_down = right_mouse_down;
 
         if (machine.mem.keyboard_latch & 0x80) == 0 {
             if let Some(ascii) = key_queue.pop_front() {
