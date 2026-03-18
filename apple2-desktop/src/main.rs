@@ -75,9 +75,9 @@ impl AudioMixerState {
             self.sample_accumulator += sample_val;
             self.subsample_count += 1;
 
-            // We use 2x oversampling, so we average every 2 subsamples.
-            if self.subsample_count >= 2 {
-                let final_val = self.sample_accumulator / 2.0;
+            // We use 32x oversampling, so we average every 32 subsamples.
+            if self.subsample_count >= 32 {
+                let final_val = self.sample_accumulator / 32.0;
                 
                 // DC Offset Filter (High-pass)
                 let filtered_val = final_val - *dc_filter_x1 + 0.995 * *dc_filter_y1;
@@ -360,8 +360,8 @@ fn main() {
     let mut dc_filter_y1: f32 = 0.0;
     let mut audio_mixer = AudioMixerState::new(machine.mem.speaker);
     let sample_rate: u32 = 44_100;
-    // We use 2x oversampling internally.
-    let oversample_factor = 2;
+    // We use 32x oversampling internally.
+    let oversample_factor = 32;
     let internal_sample_rate = sample_rate * oversample_factor;
     let cycles_per_subsample = 1_023_000.0_f64 / internal_sample_rate as f64;
     update_window_title(&mut window, speed_multiplier, false);
