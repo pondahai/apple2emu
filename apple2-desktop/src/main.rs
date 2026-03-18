@@ -61,11 +61,11 @@ impl AudioMixerState {
             // --- Window complete: Produce a sample ---
             // Calculate duty cycle (0.0 to 1.0)
             let duty_cycle = self.high_time_accumulator / cycles_per_sample;
-            // Convert to signal range (-0.25 to 0.25)
-            let raw_val = (duty_cycle as f32 * 0.5) - 0.25;
+            // Convert to signal range (-0.4 to 0.4)
+            let raw_val = (duty_cycle as f32 * 0.8) - 0.4;
 
-            // Apply analog low-pass filter at the sample rate (approx 10kHz cutoff)
-            let alpha = 0.6; 
+            // Apply analog low-pass filter at the sample rate (approx 3.8kHz cutoff)
+            let alpha = 0.35; 
             self.lpf_state += alpha * (raw_val - self.lpf_state);
             let final_val = self.lpf_state;
 
@@ -528,6 +528,20 @@ fn main() {
         let auto_disk_turbo_active = machine.mem.disk2.motor_on;
         let effective_speed_multiplier = if auto_disk_turbo_active { MAX_SPEED_MULTIPLIER } else { speed_multiplier };
         
+        let turbo_mode = auto_disk_turbo_active || effective_speed_multiplier > 1;
+        let desired_fps = if auto_disk_turbo_active {
+            0 // Unthrottled
+        } else if turbo_mode {
+            120
+        } else {
+            60
+        };
+
+        if current_target_fps != desired_fps {
+            window.set_target_fps(desired_fps);
+            current_target_fps = desired_fps;
+        }
+
         if last_title_speed_multiplier != speed_multiplier || last_title_auto_disk_turbo != auto_disk_turbo_active {
             update_window_title(&mut window, speed_multiplier, auto_disk_turbo_active);
             last_title_speed_multiplier = speed_multiplier;
