@@ -13,8 +13,10 @@ use config::EmulatorConfig;
 struct AudioMixerState {
     next_sample_cycle: f64,
     last_mix_cycle: f64,
-    speaker_high_cycles: f64,
     speaker_on: bool,
+    // PolyBLEP residuals for current and next sample
+    blep_correction_current: f32,
+    blep_correction_next: f32,
 }
 
 impl AudioMixerState {
@@ -22,16 +24,33 @@ impl AudioMixerState {
         Self {
             next_sample_cycle: 0.0,
             last_mix_cycle: 0.0,
-            speaker_high_cycles: 0.0,
             speaker_on: initial_speaker_on,
+            blep_correction_current: 0.0,
+            blep_correction_next: 0.0,
         }
     }
 
     fn reset_at(&mut self, cycle: f64, cycles_per_sample: f64, speaker_on: bool) {
         self.next_sample_cycle = cycle + cycles_per_sample;
         self.last_mix_cycle = cycle;
-        self.speaker_high_cycles = 0.0;
         self.speaker_on = speaker_on;
+        self.blep_correction_current = 0.0;
+        self.blep_correction_next = 0.0;
+    }
+
+    /// Adds a Band-Limited Step correction to the audio buffer.
+    /// t is the fractional offset [0, 1) within the sample where the toggle occurred.
+    /// direction: -1.0 for 1->0 (falling), 1.0 for 0->1 (rising)
+    fn apply_blep(&mut self, t: f64, direction: f32) {
+        let t = t as f32;
+        // PolyBLEP residual formulas:
+        // Current sample: -(t - t^2/2 - 0.5)
+        // Next sample: -(t^2/2)
+        let c0 = (t - (t * t / 2.0) - 0.5) * direction;
+        let c1 = (t * t / 2.0) * direction;
+
+        self.blep_correction_current -= c0;
+        self.blep_correction_next -= c1;
     }
 
     fn mix_until(
@@ -42,33 +61,30 @@ impl AudioMixerState {
         dc_filter_y1: &mut f32,
         audio_samples: &mut Vec<f32>,
     ) {
-        let first_sample_cycle = cycles_per_sample;
-        while self.last_mix_cycle < target_cycle {
-            let next_boundary = if self.next_sample_cycle > 0.0 {
-                self.next_sample_cycle
-            } else {
-                first_sample_cycle
-            };
-            let segment_end = target_cycle.min(next_boundary);
-            let span = segment_end - self.last_mix_cycle;
+        let first_sample_cycle = if self.next_sample_cycle > 0.0 {
+            self.next_sample_cycle - cycles_per_sample
+        } else {
+            0.0
+        };
 
-            if self.speaker_on {
-                self.speaker_high_cycles += span;
-            }
+        while self.next_sample_cycle <= target_cycle {
+            // The value for this sample is simply the current speaker state (0 or 1)
+            // converted to a signal (-0.15 or 0.15), plus any BLEP corrections.
+            let raw_val = if self.speaker_on { 0.15 } else { -0.15 };
+            let sample_val = raw_val + self.blep_correction_current;
 
-            self.last_mix_cycle = segment_end;
+            // DC Offset Filter (High-pass)
+            let filtered_val = sample_val - *dc_filter_x1 + 0.995 * *dc_filter_y1;
+            *dc_filter_x1 = sample_val;
+            *dc_filter_y1 = filtered_val;
+            audio_samples.push(filtered_val);
 
-            if self.last_mix_cycle + f64::EPSILON >= next_boundary {
-                let ratio = (self.speaker_high_cycles / cycles_per_sample).clamp(0.0, 1.0) as f32;
-                let raw_sample_val = (ratio * 0.3) - 0.15;
-                let filtered_val = raw_sample_val - *dc_filter_x1 + 0.995 * *dc_filter_y1;
-                *dc_filter_x1 = raw_sample_val;
-                *dc_filter_y1 = filtered_val;
-                audio_samples.push(filtered_val);
+            // Carry over the next correction to become the current one
+            self.blep_correction_current = self.blep_correction_next;
+            self.blep_correction_next = 0.0;
 
-                self.speaker_high_cycles = 0.0;
-                self.next_sample_cycle = next_boundary + cycles_per_sample;
-            }
+            self.last_mix_cycle = self.next_sample_cycle;
+            self.next_sample_cycle += cycles_per_sample;
         }
     }
 }
@@ -181,7 +197,7 @@ mod tests {
 
         assert_eq!(mixer.last_mix_cycle, 12_345.0);
         assert_eq!(mixer.next_sample_cycle, 12_368.0);
-        assert_eq!(mixer.speaker_high_cycles, 0.0);
+        assert_eq!(mixer.blep_correction_current, 0.0);
         assert!(mixer.speaker_on);
     }
 }
@@ -834,13 +850,21 @@ fn main() {
             frame_cycles += cycles;
 
             for edge_cycle in machine.mem.take_speaker_toggle_cycles() {
+                let edge_f = edge_cycle as f64;
                 audio_mixer.mix_until(
-                    edge_cycle as f64,
+                    edge_f,
                     cycles_per_sample,
                     &mut dc_filter_x1,
                     &mut dc_filter_y1,
                     &mut audio_samples,
                 );
+
+                // Apply PolyBLEP correction at the toggle point.
+                // t is the fractional distance into the *current* sample period [0, 1).
+                let t = 1.0 - ((audio_mixer.next_sample_cycle - edge_f) / cycles_per_sample);
+                let direction = if audio_mixer.speaker_on { -1.0 } else { 1.0 };
+                audio_mixer.apply_blep(t, direction);
+
                 audio_mixer.speaker_on = !audio_mixer.speaker_on;
             }
 
