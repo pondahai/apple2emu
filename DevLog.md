@@ -155,22 +155,11 @@
     * `cargo run --quiet --bin save_smoke`
     * `cargo run --quiet --bin goonies_probe`
 
-## 20. 外部資料查核：`The Goonies` 與 Apple II 保護盤脈絡 (2026-03-14)
-* **已確認的外部事實**：
-  * `The Goonies` Apple II 版為 **Datasoft** 發行的 1985 年商業版本。
-  * 這至少說明它屬於 Apple II 商業保護盤常見年代與發行商範圍。
-* **與目前觀察吻合的外部脈絡**：
-  * Apple II 商業保護盤常會直接輪詢 Disk II 資料暫存器（如 `$C08C`），依賴 bit-stream、sync、bit-slip、weak bits 或非標準 sector/track 佈局。
-  * 這與 `goonies_probe` 看到 RAM `$0380` 反覆輪詢 `$C08C` 尋找 `D5 AA 96` prologue 的現象一致。
-* **模擬器實作上的旁證**：
-  * 多個 Apple II 模擬器/工具鏈都提過：若軟體使用非標準保護或 track-level 行為，單純 `.dsk` 表示法可能不足，往往需要更原始的 nibble/track 格式支援。
-  * AppleWin 歷年 release note 也可見持續修正 Disk II 相容性邊界案例，顯示這類問題在實務上很常見。
-* **目前仍未查到的部分**：
-  * 尚未找到公開資料明確指出 `The Goonies` Apple II 版採用哪一種 Datasoft copy protection。
-  * 尚未找到直接描述「`The Goonies` 在某模擬器卡在 track 23 / 花螢幕」的公開個案。
-* **本段結論（推論，不是已證實事實）**：
-  * `The Goonies` 很可能使用對 Disk II 後段讀取語意較敏感的商業 loader / 保護機制。
-  * 因此問題最合理地仍指向 Disk II read sequencer / `$C08C` polling 相容性缺口，而不是 `.gz` 載入、GUI 路徑或一般 DOS 啟動流程。
+## 20. 音訊抗混疊進階優化與 PolyBLEP 實作 (2026-03-18)
+* **從面積積分升級至 PolyBLEP**：捨棄原有的「週期面積平均法（Area-based Integration）」，改為實作 **PolyBLEP (Polynomial Band-Limited Step)** 演算法。透過在喇叭狀態翻轉（Toggle）的精確時間點加上多項式修正項，從數學上抵消高頻方波產生的混疊（Aliasing）雜訊。
+* **2x 過度採樣 (Oversampling)**：為了更精確地捕捉 Apple II 喇叭極高頻（~1MHz）的隨機切換，將內部音訊處理頻率提升至 **88.2 kHz**，每產生兩個子採樣後取平均值輸出。這顯著提高了時間解析度，有助於還原白噪音的音質特徵。
+* **修正項縮放與精確度**：修正了 PolyBLEP 修正項與音訊訊號之間的縮放比例誤差，確保修正波形正確作用於 `±0.25` 的動態範圍內。
+* **實驗觀察**：雖然架構上已具備現代模擬器的抗混疊水準，但《德軍總部》等遊戲中原本應為「沙沙」聲的槍聲在部分環境下仍呈現「單音」傾向。這推測可能與 CPU 指令執行的微觀時序（Jitter）、或是 `$C030` 被存取時的同步間隔有關，仍需後續深度調查。
 
 ## 21. `goonies_probe` 續追：`$0380` 的 `$C08C` polling 已能命中 address field (2026-03-14)
 * **本輪追加觀測**：

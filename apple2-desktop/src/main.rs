@@ -14,9 +14,12 @@ struct AudioMixerState {
     next_sample_cycle: f64,
     last_mix_cycle: f64,
     speaker_on: bool,
-    // PolyBLEP residuals for current and next sample
+    // PolyBLEP residuals
     blep_correction_current: f32,
     blep_correction_next: f32,
+    // Oversampling state
+    sample_accumulator: f32,
+    subsample_count: u32,
 }
 
 impl AudioMixerState {
@@ -27,64 +30,70 @@ impl AudioMixerState {
             speaker_on: initial_speaker_on,
             blep_correction_current: 0.0,
             blep_correction_next: 0.0,
+            sample_accumulator: 0.0,
+            subsample_count: 0,
         }
     }
 
-    fn reset_at(&mut self, cycle: f64, cycles_per_sample: f64, speaker_on: bool) {
-        self.next_sample_cycle = cycle + cycles_per_sample;
+    fn reset_at(&mut self, cycle: f64, cycles_per_subsample: f64, speaker_on: bool) {
+        self.next_sample_cycle = cycle + cycles_per_subsample;
         self.last_mix_cycle = cycle;
         self.speaker_on = speaker_on;
         self.blep_correction_current = 0.0;
         self.blep_correction_next = 0.0;
+        self.sample_accumulator = 0.0;
+        self.subsample_count = 0;
     }
 
     /// Adds a Band-Limited Step correction to the audio buffer.
-    /// t is the fractional offset [0, 1) within the sample where the toggle occurred.
+    /// t is the fractional offset [0, 1) within the subsample where the toggle occurred.
     /// direction: -1.0 for 1->0 (falling), 1.0 for 0->1 (rising)
     fn apply_blep(&mut self, t: f64, direction: f32) {
         let t = t as f32;
-        // PolyBLEP residual formulas:
-        // Current sample: -(t - t^2/2 - 0.5)
-        // Next sample: -(t^2/2)
+        // PolyBLEP residual formulas for unit step
         let c0 = (t - (t * t / 2.0) - 0.5) * direction;
         let c1 = (t * t / 2.0) * direction;
 
-        self.blep_correction_current -= c0;
-        self.blep_correction_next -= c1;
+        // Scale by our actual signal step (0.25 - (-0.25) = 0.5)
+        let step_height = 0.5;
+        self.blep_correction_current -= c0 * step_height;
+        self.blep_correction_next -= c1 * step_height;
     }
 
     fn mix_until(
         &mut self,
         target_cycle: f64,
-        cycles_per_sample: f64,
+        cycles_per_subsample: f64,
         dc_filter_x1: &mut f32,
         dc_filter_y1: &mut f32,
         audio_samples: &mut Vec<f32>,
     ) {
-        let first_sample_cycle = if self.next_sample_cycle > 0.0 {
-            self.next_sample_cycle - cycles_per_sample
-        } else {
-            0.0
-        };
-
         while self.next_sample_cycle <= target_cycle {
-            // The value for this sample is simply the current speaker state (0 or 1)
-            // converted to a signal (-0.15 or 0.15), plus any BLEP corrections.
-            let raw_val = if self.speaker_on { 0.15 } else { -0.15 };
+            let raw_val = if self.speaker_on { 0.25 } else { -0.25 };
             let sample_val = raw_val + self.blep_correction_current;
 
-            // DC Offset Filter (High-pass)
-            let filtered_val = sample_val - *dc_filter_x1 + 0.995 * *dc_filter_y1;
-            *dc_filter_x1 = sample_val;
-            *dc_filter_y1 = filtered_val;
-            audio_samples.push(filtered_val);
+            self.sample_accumulator += sample_val;
+            self.subsample_count += 1;
 
-            // Carry over the next correction to become the current one
+            // We use 2x oversampling, so we average every 2 subsamples.
+            if self.subsample_count >= 2 {
+                let final_val = self.sample_accumulator / 2.0;
+                
+                // DC Offset Filter (High-pass)
+                let filtered_val = final_val - *dc_filter_x1 + 0.995 * *dc_filter_y1;
+                *dc_filter_x1 = final_val;
+                *dc_filter_y1 = filtered_val;
+                audio_samples.push(filtered_val);
+
+                self.sample_accumulator = 0.0;
+                self.subsample_count = 0;
+            }
+
             self.blep_correction_current = self.blep_correction_next;
             self.blep_correction_next = 0.0;
 
             self.last_mix_cycle = self.next_sample_cycle;
-            self.next_sample_cycle += cycles_per_sample;
+            self.next_sample_cycle += cycles_per_subsample;
         }
     }
 }
@@ -351,7 +360,10 @@ fn main() {
     let mut dc_filter_y1: f32 = 0.0;
     let mut audio_mixer = AudioMixerState::new(machine.mem.speaker);
     let sample_rate: u32 = 44_100;
-    let cycles_per_sample = 1_023_000.0_f64 / sample_rate as f64;
+    // We use 2x oversampling internally.
+    let oversample_factor = 2;
+    let internal_sample_rate = sample_rate * oversample_factor;
+    let cycles_per_subsample = 1_023_000.0_f64 / internal_sample_rate as f64;
     update_window_title(&mut window, speed_multiplier, false);
     let mut current_target_fps: usize = 60;
     let mut last_title_speed_multiplier = speed_multiplier;
@@ -736,7 +748,7 @@ fn main() {
                 machine.reset();
             }
             sink = rebuild_sink(audio_handle.as_ref());
-            audio_mixer.reset_at(machine.total_cycles as f64, cycles_per_sample, machine.mem.speaker);
+            audio_mixer.reset_at(machine.total_cycles as f64, cycles_per_subsample, machine.mem.speaker);
             dc_filter_x1 = 0.0;
             dc_filter_y1 = 0.0;
         }
@@ -769,7 +781,7 @@ fn main() {
                             sink = rebuild_sink(audio_handle.as_ref());
                             audio_mixer.reset_at(
                                 machine.total_cycles as f64,
-                                cycles_per_sample,
+                                cycles_per_subsample,
                                 machine.mem.speaker,
                             );
                             dc_filter_x1 = 0.0;
@@ -853,7 +865,7 @@ fn main() {
                 let edge_f = edge_cycle as f64;
                 audio_mixer.mix_until(
                     edge_f,
-                    cycles_per_sample,
+                    cycles_per_subsample,
                     &mut dc_filter_x1,
                     &mut dc_filter_y1,
                     &mut audio_samples,
@@ -861,7 +873,7 @@ fn main() {
 
                 // Apply PolyBLEP correction at the toggle point.
                 // t is the fractional distance into the *current* sample period [0, 1).
-                let t = 1.0 - ((audio_mixer.next_sample_cycle - edge_f) / cycles_per_sample);
+                let t = 1.0 - ((audio_mixer.next_sample_cycle - edge_f) / cycles_per_subsample);
                 let direction = if audio_mixer.speaker_on { -1.0 } else { 1.0 };
                 audio_mixer.apply_blep(t, direction);
 
@@ -870,7 +882,7 @@ fn main() {
 
             audio_mixer.mix_until(
                 machine.total_cycles as f64,
-                cycles_per_sample,
+                cycles_per_subsample,
                 &mut dc_filter_x1,
                 &mut dc_filter_y1,
                 &mut audio_samples,
