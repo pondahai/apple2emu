@@ -14,12 +14,10 @@ struct AudioMixerState {
     next_sample_cycle: f64,
     last_mix_cycle: f64,
     speaker_on: bool,
-    // PolyBLEP residuals
-    blep_correction_current: f32,
-    blep_correction_next: f32,
-    // Oversampling state
-    sample_accumulator: f32,
-    subsample_count: u32,
+    // Accumulates total "on" time (in cycles) for the current sample window
+    high_time_accumulator: f64,
+    // Analog LPF state
+    lpf_state: f32,
 }
 
 impl AudioMixerState {
@@ -28,72 +26,69 @@ impl AudioMixerState {
             next_sample_cycle: 0.0,
             last_mix_cycle: 0.0,
             speaker_on: initial_speaker_on,
-            blep_correction_current: 0.0,
-            blep_correction_next: 0.0,
-            sample_accumulator: 0.0,
-            subsample_count: 0,
+            high_time_accumulator: 0.0,
+            lpf_state: 0.0,
         }
     }
 
-    fn reset_at(&mut self, cycle: f64, cycles_per_subsample: f64, speaker_on: bool) {
-        self.next_sample_cycle = cycle + cycles_per_subsample;
+    fn reset_at(&mut self, cycle: f64, cycles_per_sample: f64, speaker_on: bool) {
+        self.next_sample_cycle = cycle + cycles_per_sample;
         self.last_mix_cycle = cycle;
         self.speaker_on = speaker_on;
-        self.blep_correction_current = 0.0;
-        self.blep_correction_next = 0.0;
-        self.sample_accumulator = 0.0;
-        self.subsample_count = 0;
-    }
-
-    /// Adds a Band-Limited Step correction to the audio buffer.
-    /// t is the fractional offset [0, 1) within the subsample where the toggle occurred.
-    /// direction: -1.0 for 1->0 (falling), 1.0 for 0->1 (rising)
-    fn apply_blep(&mut self, t: f64, direction: f32) {
-        let t = t as f32;
-        // PolyBLEP residual formulas for unit step
-        let c0 = (t - (t * t / 2.0) - 0.5) * direction;
-        let c1 = (t * t / 2.0) * direction;
-
-        // Scale by our actual signal step (0.25 - (-0.25) = 0.5)
-        let step_height = 0.5;
-        self.blep_correction_current -= c0 * step_height;
-        self.blep_correction_next -= c1 * step_height;
+        self.high_time_accumulator = 0.0;
+        self.lpf_state = 0.0;
     }
 
     fn mix_until(
         &mut self,
         target_cycle: f64,
-        cycles_per_subsample: f64,
+        cycles_per_sample: f64,
         dc_filter_x1: &mut f32,
         dc_filter_y1: &mut f32,
         audio_samples: &mut Vec<f32>,
     ) {
+        let mut current_cycle = self.last_mix_cycle;
+
         while self.next_sample_cycle <= target_cycle {
-            let raw_val = if self.speaker_on { 0.25 } else { -0.25 };
-            let sample_val = raw_val + self.blep_correction_current;
+            // How much of the remaining sample window is covered until the target or sample boundary?
+            let segment_end = self.next_sample_cycle;
+            let segment_duration = segment_end - current_cycle;
 
-            self.sample_accumulator += sample_val;
-            self.subsample_count += 1;
-
-            // We use 32x oversampling, so we average every 32 subsamples.
-            if self.subsample_count >= 32 {
-                let final_val = self.sample_accumulator / 32.0;
-                
-                // DC Offset Filter (High-pass)
-                let filtered_val = final_val - *dc_filter_x1 + 0.995 * *dc_filter_y1;
-                *dc_filter_x1 = final_val;
-                *dc_filter_y1 = filtered_val;
-                audio_samples.push(filtered_val);
-
-                self.sample_accumulator = 0.0;
-                self.subsample_count = 0;
+            if self.speaker_on {
+                self.high_time_accumulator += segment_duration;
             }
 
-            self.blep_correction_current = self.blep_correction_next;
-            self.blep_correction_next = 0.0;
+            // --- Window complete: Produce a sample ---
+            // Calculate duty cycle (0.0 to 1.0)
+            let duty_cycle = self.high_time_accumulator / cycles_per_sample;
+            // Convert to signal range (-0.25 to 0.25)
+            let raw_val = (duty_cycle as f32 * 0.5) - 0.25;
 
-            self.last_mix_cycle = self.next_sample_cycle;
-            self.next_sample_cycle += cycles_per_subsample;
+            // Apply analog low-pass filter at the sample rate (approx 10kHz cutoff)
+            let alpha = 0.6; 
+            self.lpf_state += alpha * (raw_val - self.lpf_state);
+            let final_val = self.lpf_state;
+
+            // DC Offset Filter (High-pass)
+            let filtered_val = final_val - *dc_filter_x1 + 0.995 * *dc_filter_y1;
+            *dc_filter_x1 = final_val;
+            *dc_filter_y1 = filtered_val;
+            audio_samples.push(filtered_val);
+
+            // Reset for next sample window
+            current_cycle = self.next_sample_cycle;
+            self.next_sample_cycle += cycles_per_sample;
+            self.high_time_accumulator = 0.0;
+        }
+
+        // Handle the remaining partial segment after the last sample boundary
+        if current_cycle < target_cycle {
+            if self.speaker_on {
+                self.high_time_accumulator += target_cycle - current_cycle;
+            }
+            self.last_mix_cycle = target_cycle;
+        } else {
+            self.last_mix_cycle = current_cycle;
         }
     }
 }
@@ -206,7 +201,6 @@ mod tests {
 
         assert_eq!(mixer.last_mix_cycle, 12_345.0);
         assert_eq!(mixer.next_sample_cycle, 12_368.0);
-        assert_eq!(mixer.blep_correction_current, 0.0);
         assert!(mixer.speaker_on);
     }
 }
@@ -363,10 +357,7 @@ fn main() {
     let mut dc_filter_y1: f32 = 0.0;
     let mut audio_mixer = AudioMixerState::new(machine.mem.speaker);
     let sample_rate: u32 = 44_100;
-    // We use 32x oversampling internally.
-    let oversample_factor = 32;
-    let internal_sample_rate = sample_rate * oversample_factor;
-    let cycles_per_subsample = 1_023_000.0_f64 / internal_sample_rate as f64;
+    let cycles_per_sample = 1_023_000.0_f64 / sample_rate as f64;
     update_window_title(&mut window, speed_multiplier, false);
     let mut current_target_fps: usize = 60;
     let mut last_title_speed_multiplier = speed_multiplier;
@@ -401,312 +392,49 @@ fn main() {
 
         for &key in keys.iter() {
             let ascii = match key {
-                Key::A => {
-                    if ctrl_down {
-                        0x01
-                    } else {
-                        b'A'
-                    }
-                }
-                Key::B => {
-                    if ctrl_down {
-                        0x02
-                    } else {
-                        b'B'
-                    }
-                }
-                Key::C => {
-                    if ctrl_down {
-                        0x03
-                    } else {
-                        b'C'
-                    }
-                }
-                Key::D => {
-                    if ctrl_down {
-                        0x04
-                    } else {
-                        b'D'
-                    }
-                }
-                Key::E => {
-                    if ctrl_down {
-                        0x05
-                    } else {
-                        b'E'
-                    }
-                }
-                Key::F => {
-                    if ctrl_down {
-                        0x06
-                    } else {
-                        b'F'
-                    }
-                }
-                Key::G => {
-                    if ctrl_down {
-                        0x07
-                    } else {
-                        b'G'
-                    }
-                }
-                Key::H => {
-                    if ctrl_down {
-                        0x08
-                    } else {
-                        b'H'
-                    }
-                }
-                Key::I => {
-                    if ctrl_down {
-                        0x09
-                    } else {
-                        b'I'
-                    }
-                }
-                Key::J => {
-                    if ctrl_down {
-                        0x0A
-                    } else {
-                        b'J'
-                    }
-                }
-                Key::K => {
-                    if ctrl_down {
-                        0x0B
-                    } else {
-                        b'K'
-                    }
-                }
-                Key::L => {
-                    if ctrl_down {
-                        0x0C
-                    } else {
-                        b'L'
-                    }
-                }
-                Key::M => {
-                    if ctrl_down {
-                        0x0D
-                    } else {
-                        b'M'
-                    }
-                }
-                Key::N => {
-                    if ctrl_down {
-                        0x0E
-                    } else {
-                        b'N'
-                    }
-                }
-                Key::O => {
-                    if ctrl_down {
-                        0x0F
-                    } else {
-                        b'O'
-                    }
-                }
-                Key::P => {
-                    if ctrl_down {
-                        0x10
-                    } else {
-                        b'P'
-                    }
-                }
-                Key::Q => {
-                    if ctrl_down {
-                        0x11
-                    } else {
-                        b'Q'
-                    }
-                }
-                Key::R => {
-                    if ctrl_down {
-                        0x12
-                    } else {
-                        b'R'
-                    }
-                }
-                Key::S => {
-                    if ctrl_down {
-                        0x13
-                    } else {
-                        b'S'
-                    }
-                }
-                Key::T => {
-                    if ctrl_down {
-                        0x14
-                    } else {
-                        b'T'
-                    }
-                }
-                Key::U => {
-                    if ctrl_down {
-                        0x15
-                    } else {
-                        b'U'
-                    }
-                }
-                Key::V => {
-                    if ctrl_down {
-                        0x16
-                    } else {
-                        b'V'
-                    }
-                }
-                Key::W => {
-                    if ctrl_down {
-                        0x17
-                    } else {
-                        b'W'
-                    }
-                }
-                Key::X => {
-                    if ctrl_down {
-                        0x18
-                    } else {
-                        b'X'
-                    }
-                }
-                Key::Y => {
-                    if ctrl_down {
-                        0x19
-                    } else {
-                        b'Y'
-                    }
-                }
-                Key::Z => {
-                    if ctrl_down {
-                        0x1A
-                    } else {
-                        b'Z'
-                    }
-                }
-
-                // Numbers and Symbols
-                Key::Key0 => {
-                    if shift_down {
-                        b')'
-                    } else {
-                        b'0'
-                    }
-                }
-                Key::Key1 => {
-                    if shift_down {
-                        b'!'
-                    } else {
-                        b'1'
-                    }
-                }
-                Key::Key2 => {
-                    if shift_down {
-                        b'@'
-                    } else {
-                        b'2'
-                    }
-                }
-                Key::Key3 => {
-                    if shift_down {
-                        b'#'
-                    } else {
-                        b'3'
-                    }
-                }
-                Key::Key4 => {
-                    if shift_down {
-                        b'$'
-                    } else {
-                        b'4'
-                    }
-                }
-                Key::Key5 => {
-                    if shift_down {
-                        b'%'
-                    } else {
-                        b'5'
-                    }
-                }
-                Key::Key6 => {
-                    if shift_down {
-                        b'^'
-                    } else {
-                        b'6'
-                    }
-                }
-                Key::Key7 => {
-                    if shift_down {
-                        b'&'
-                    } else {
-                        b'7'
-                    }
-                }
-                Key::Key8 => {
-                    if shift_down {
-                        b'*'
-                    } else {
-                        b'8'
-                    }
-                }
-                Key::Key9 => {
-                    if shift_down {
-                        b'('
-                    } else {
-                        b'9'
-                    }
-                }
-
-                Key::Minus => {
-                    if shift_down {
-                        b'_'
-                    } else {
-                        b'-'
-                    }
-                }
-                Key::Equal => {
-                    if shift_down {
-                        b'+'
-                    } else {
-                        b'='
-                    }
-                }
-                Key::Comma => {
-                    if shift_down {
-                        b'<'
-                    } else {
-                        b','
-                    }
-                }
-                Key::Period => {
-                    if shift_down {
-                        b'>'
-                    } else {
-                        b'.'
-                    }
-                }
-                Key::Slash => {
-                    if shift_down {
-                        b'?'
-                    } else {
-                        b'/'
-                    }
-                }
-                Key::Semicolon => {
-                    if shift_down {
-                        b':'
-                    } else {
-                        b';'
-                    }
-                }
-                Key::Apostrophe => {
-                    if shift_down {
-                        b'"'
-                    } else {
-                        b'\''
-                    }
-                }
-
-                // Control Keys
+                Key::A => if ctrl_down { 0x01 } else { b'A' },
+                Key::B => if ctrl_down { 0x02 } else { b'B' },
+                Key::C => if ctrl_down { 0x03 } else { b'C' },
+                Key::D => if ctrl_down { 0x04 } else { b'D' },
+                Key::E => if ctrl_down { 0x05 } else { b'E' },
+                Key::F => if ctrl_down { 0x06 } else { b'F' },
+                Key::G => if ctrl_down { 0x07 } else { b'G' },
+                Key::H => if ctrl_down { 0x08 } else { b'H' },
+                Key::I => if ctrl_down { 0x09 } else { b'I' },
+                Key::J => if ctrl_down { 0x0A } else { b'J' },
+                Key::K => if ctrl_down { 0x0B } else { b'K' },
+                Key::L => if ctrl_down { 0x0C } else { b'L' },
+                Key::M => if ctrl_down { 0x0D } else { b'M' },
+                Key::N => if ctrl_down { 0x0E } else { b'N' },
+                Key::O => if ctrl_down { 0x0F } else { b'O' },
+                Key::P => if ctrl_down { 0x10 } else { b'P' },
+                Key::Q => if ctrl_down { 0x11 } else { b'Q' },
+                Key::R => if ctrl_down { 0x12 } else { b'R' },
+                Key::S => if ctrl_down { 0x13 } else { b'S' },
+                Key::T => if ctrl_down { 0x14 } else { b'T' },
+                Key::U => if ctrl_down { 0x15 } else { b'U' },
+                Key::V => if ctrl_down { 0x16 } else { b'V' },
+                Key::W => if ctrl_down { 0x17 } else { b'W' },
+                Key::X => if ctrl_down { 0x18 } else { b'X' },
+                Key::Y => if ctrl_down { 0x19 } else { b'Y' },
+                Key::Z => if ctrl_down { 0x1A } else { b'Z' },
+                Key::Key0 => if shift_down { b')' } else { b'0' },
+                Key::Key1 => if shift_down { b'!' } else { b'1' },
+                Key::Key2 => if shift_down { b'@' } else { b'2' },
+                Key::Key3 => if shift_down { b'#' } else { b'3' },
+                Key::Key4 => if shift_down { b'$' } else { b'4' },
+                Key::Key5 => if shift_down { b'%' } else { b'5' },
+                Key::Key6 => if shift_down { b'^' } else { b'6' },
+                Key::Key7 => if shift_down { b'&' } else { b'7' },
+                Key::Key8 => if shift_down { b'*' } else { b'8' },
+                Key::Key9 => if shift_down { b'(' } else { b'9' },
+                Key::Minus => if shift_down { b'_' } else { b'-' },
+                Key::Equal => if shift_down { b'+' } else { b'=' },
+                Key::Comma => if shift_down { b'<' } else { b',' },
+                Key::Period => if shift_down { b'>' } else { b'.' },
+                Key::Slash => if shift_down { b'?' } else { b'/' },
+                Key::Semicolon => if shift_down { b':' } else { b';' },
+                Key::Apostrophe => if shift_down { b'"' } else { b'\'' },
                 Key::Space => b' ',
                 Key::Enter => 0x0D,
                 Key::Backspace => 0x08,
@@ -724,79 +452,44 @@ fn main() {
                 machine.reset();
             } else {
                 println!(">>> REBOOT (Cold Boot)");
-                // Save changes before cold boot
                 if machine.mem.disk2.is_dirty {
                     let path_to_save = config.last_disk_path.as_ref().unwrap_or(&dsk_path);
                     if let Ok(new_disk) = apple2_core::nibble::denibblize_dsk(&machine.mem.disk2.tracks) {
-                        if let Err(e) = save_disk_image(path_to_save, &new_disk) {
-                            println!("ERROR: Failed to save changes to current disk {:?}: {}", path_to_save.file_name().unwrap_or_default(), e);
-                        } else {
-                            println!("Saved changes to disk before reboot: {:?}", path_to_save.file_name().unwrap_or_default());
-                            // IMPORTANT: Update our memory cache with the new data so the reboot uses the updated disk!
-                            cached_disk_image = Some(new_disk);
-                        }
+                        let _ = save_disk_image(path_to_save, &new_disk);
+                        cached_disk_image = Some(new_disk);
                     }
                 }
-
                 machine = Apple2Machine::new();
-                if !cached_main_rom.is_empty() {
-                    machine.load_rom(&cached_main_rom);
-                }
-                if !cached_disk_rom.is_empty() {
-                    machine.mem.disk2.load_boot_rom(&cached_disk_rom);
-                }
-                if let Some(ref disk) = cached_disk_image {
-                    machine.mem.disk2.load_disk(disk);
-                }
+                if !cached_main_rom.is_empty() { machine.load_rom(&cached_main_rom); }
+                if !cached_disk_rom.is_empty() { machine.mem.disk2.load_boot_rom(&cached_disk_rom); }
+                if let Some(ref disk) = cached_disk_image { machine.mem.disk2.load_disk(disk); }
                 machine.reset();
             }
             sink = rebuild_sink(audio_handle.as_ref());
-            audio_mixer.reset_at(machine.total_cycles as f64, cycles_per_subsample, machine.mem.speaker);
-            dc_filter_x1 = 0.0;
-            dc_filter_y1 = 0.0;
+            audio_mixer.reset_at(machine.total_cycles as f64, cycles_per_sample, machine.mem.speaker);
+            dc_filter_x1 = 0.0; dc_filter_y1 = 0.0;
         }
         last_f2_down = window.is_key_down(Key::F2);
 
         let f3_down = window.is_key_down(Key::F3);
         if f3_down && !last_f3_down {
-            let file = rfd::FileDialog::new()
-                .add_filter("Apple II Disk Image", &["dsk", "do", "po", "gz"])
-                .pick_file();
-            if let Some(path) = file {
+            if let Some(path) = rfd::FileDialog::new().add_filter("Apple II Disk", &["dsk","gz"]).pick_file() {
                 if let Ok(raw_data) = std::fs::read(&path) {
-                    match decode_disk_image(&path, raw_data) {
-                        Ok(disk_image) => {
-                            // Check if current disk is dirty and save it before loading new one
-                            if machine.mem.disk2.is_dirty {
-                                if let Some(ref current_path) = config.last_disk_path {
-                                    if let Ok(new_disk) = apple2_core::nibble::denibblize_dsk(&machine.mem.disk2.tracks) {
-                                        if let Err(e) = save_disk_image(current_path, &new_disk) {
-                                            println!("ERROR: Failed to save changes to current disk {:?}: {}", current_path.file_name().unwrap_or_default(), e);
-                                        } else {
-                                            println!("Saved changes to disk: {:?}", current_path.file_name().unwrap_or_default());
-                                        }
-                                    }
+                    if let Ok(disk_image) = decode_disk_image(&path, raw_data) {
+                        if machine.mem.disk2.is_dirty {
+                            if let Some(ref current_path) = config.last_disk_path {
+                                if let Ok(new_disk) = apple2_core::nibble::denibblize_dsk(&machine.mem.disk2.tracks) {
+                                    let _ = save_disk_image(current_path, &new_disk);
                                 }
                             }
-                            
-                            cached_disk_image = Some(disk_image.clone());
-                            machine.mem.disk2.load_disk(&disk_image);
-                            sink = rebuild_sink(audio_handle.as_ref());
-                            audio_mixer.reset_at(
-                                machine.total_cycles as f64,
-                                cycles_per_subsample,
-                                machine.mem.speaker,
-                            );
-                            dc_filter_x1 = 0.0;
-                            dc_filter_y1 = 0.0;
-                            println!(
-                                "Successfully loaded disk: {:?}",
-                                path.file_name().unwrap_or_default()
-                            );
-                            config.last_disk_path = Some(path);
-                            config.save();
                         }
-                        Err(e) => println!("ERROR: {}", e),
+                        cached_disk_image = Some(disk_image.clone());
+                        machine.mem.disk2.load_disk(&disk_image);
+                        sink = rebuild_sink(audio_handle.as_ref());
+                        audio_mixer.reset_at(machine.total_cycles as f64, cycles_per_sample, machine.mem.speaker);
+                        dc_filter_x1 = 0.0; dc_filter_y1 = 0.0;
+                        config.last_disk_path = Some(path);
+                        config.save();
                     }
                 }
             }
@@ -805,38 +498,19 @@ fn main() {
 
         let f4_down = window.is_key_down(Key::F4);
         if f4_down && !last_f4_down {
-            speed_multiplier = if speed_multiplier >= MAX_SPEED_MULTIPLIER {
-                1
-            } else {
-                speed_multiplier + 1
-            };
-            let turbo_mode = speed_multiplier > 1;
-            let desired_fps = if turbo_mode { 120 } else { 60 };
-            if current_target_fps != desired_fps {
-                window.set_target_fps(desired_fps);
-                current_target_fps = desired_fps;
-            }
-            println!(">>> Speed Mode: CPU x{}", speed_multiplier);
+            speed_multiplier = if speed_multiplier >= MAX_SPEED_MULTIPLIER { 1 } else { speed_multiplier + 1 };
         }
         last_f4_down = f4_down;
 
-        // Clipboard Paste on Right Click
         let right_mouse_down = window.get_mouse_down(minifb::MouseButton::Right);
         if right_mouse_down && !last_right_mouse_down {
             if let Some(ref mut cb) = clipboard {
                 if let Ok(text) = cb.get_text() {
-                    println!(">>> Pasting {} characters from clipboard...", text.len());
                     for c in text.chars() {
                         let mut ascii = c as u32;
-                        if ascii == 10 { // LF -> CR
-                            ascii = 13;
-                        }
-                        if ascii >= 97 && ascii <= 122 { // lowercase -> uppercase
-                            ascii -= 32;
-                        }
-                        if ascii < 128 {
-                            key_queue.push_back(ascii as u8);
-                        }
+                        if ascii == 10 { ascii = 13; }
+                        if ascii >= 97 && ascii <= 122 { ascii -= 32; }
+                        if ascii < 128 { key_queue.push_back(ascii as u8); }
                     }
                 }
             }
@@ -849,193 +523,48 @@ fn main() {
             }
         }
 
-        // Emulate CPU execution for one Frame
         let mut frame_cycles = 0;
         let mut audio_samples: Vec<f32> = Vec::with_capacity(1500);
         let auto_disk_turbo_active = machine.mem.disk2.motor_on;
-        let effective_speed_multiplier = if auto_disk_turbo_active {
-            MAX_SPEED_MULTIPLIER
-        } else {
-            speed_multiplier
-        };
-        let turbo_mode = auto_disk_turbo_active || effective_speed_multiplier > 1;
-        let desired_fps = if auto_disk_turbo_active {
-            0
-        } else if turbo_mode {
-            120
-        } else {
-            60
-        };
-        if current_target_fps != desired_fps {
-            window.set_target_fps(desired_fps);
-            current_target_fps = desired_fps;
-        }
-        if last_title_speed_multiplier != speed_multiplier
-            || last_title_auto_disk_turbo != auto_disk_turbo_active
-        {
+        let effective_speed_multiplier = if auto_disk_turbo_active { MAX_SPEED_MULTIPLIER } else { speed_multiplier };
+        
+        if last_title_speed_multiplier != speed_multiplier || last_title_auto_disk_turbo != auto_disk_turbo_active {
             update_window_title(&mut window, speed_multiplier, auto_disk_turbo_active);
             last_title_speed_multiplier = speed_multiplier;
             last_title_auto_disk_turbo = auto_disk_turbo_active;
         }
-        let target_cycles = if auto_disk_turbo_active {
-            BASE_FRAME_CYCLES * MAX_SPEED_MULTIPLIER
-        } else {
-            BASE_FRAME_CYCLES * effective_speed_multiplier
-        };
 
+        let target_cycles = BASE_FRAME_CYCLES * effective_speed_multiplier;
         while frame_cycles < target_cycles {
             let cycles = machine.step();
             frame_cycles += cycles;
 
             for edge_cycle in machine.mem.take_speaker_toggle_cycles() {
-                let edge_f = edge_cycle as f64;
-                audio_mixer.mix_until(
-                    edge_f,
-                    cycles_per_subsample,
-                    &mut dc_filter_x1,
-                    &mut dc_filter_y1,
-                    &mut audio_samples,
-                );
-
-                // Apply PolyBLEP correction at the toggle point.
-                // t is the fractional distance into the *current* sample period [0, 1).
-                let t = 1.0 - ((audio_mixer.next_sample_cycle - edge_f) / cycles_per_subsample);
-                let direction = if audio_mixer.speaker_on { -1.0 } else { 1.0 };
-                audio_mixer.apply_blep(t, direction);
-
+                audio_mixer.mix_until(edge_cycle as f64, cycles_per_sample, &mut dc_filter_x1, &mut dc_filter_y1, &mut audio_samples);
                 audio_mixer.speaker_on = !audio_mixer.speaker_on;
             }
-
-            audio_mixer.mix_until(
-                machine.total_cycles as f64,
-                cycles_per_subsample,
-                &mut dc_filter_x1,
-                &mut dc_filter_y1,
-                &mut audio_samples,
-            );
+            audio_mixer.mix_until(machine.total_cycles as f64, cycles_per_sample, &mut dc_filter_x1, &mut dc_filter_y1, &mut audio_samples);
         }
 
-        // Audio Frame append
         if let Some(s) = &sink {
             if !audio_samples.is_empty() {
-                // To prevent chopped audio, we want to maintain a healthy backlog ahead of the soundcard.
-                let buf_len = s.len();
-                let max_buf = if turbo_mode { 30 } else { 15 };
-
-                // Avoid hard-clearing the queue (can cause audible dropouts). If backlog is high,
-                // skip appending this frame and let the device catch up naturally.
-                if buf_len <= max_buf {
-                    // If the queue is running dry (under 2 frames), we inject a tiny bit of silence
-                    // to give the emulator a moment to catch up, preventing hard clipping.
-                    if buf_len == 0 {
-                        let mut padding = vec![0.0; (sample_rate / 60) as usize];
-                        // smoothly transition the padding into silence
-                        for x in padding.iter_mut() {
-                            *x = dc_filter_y1;
-                            dc_filter_y1 *= 0.995;
-                        }
-                        let pad_source = rodio::buffer::SamplesBuffer::new(1, sample_rate, padding);
-                        s.append(pad_source);
-                    }
-
-                    let source = rodio::buffer::SamplesBuffer::new(1, sample_rate, audio_samples);
-                    s.append(source);
+                if s.len() <= 15 {
+                    s.append(rodio::buffer::SamplesBuffer::new(1, sample_rate, audio_samples));
                 }
             }
         }
 
-        // Periodic Debug
-        #[cfg(debug_assertions)]
-        {
-            static mut FRAME_COUNT: u32 = 0;
-            if !turbo_mode {
-                unsafe {
-                    FRAME_COUNT += 1;
-                    if FRAME_COUNT % 60 == 0 {
-                        let mut row_data = String::new();
-                        for i in 0..32 {
-                            row_data.push_str(&format!("{:02X} ", machine.mem.read(0x0800 + i)));
-                        }
-                        let mut vec_data = String::new();
-                        for i in 0..32 {
-                            vec_data.push_str(&format!("{:02X} ", machine.mem.read(0x03D0 + i)));
-                        }
-                        let mut buf_data = String::new();
-                        for i in 0..16 {
-                            buf_data.push_str(&format!("{:02X} ", machine.mem.read(0x0200 + i)));
-                        }
+        if machine.mem.text_mode { video.render_text_frame(&machine.mem, &char_rom); }
+        else if machine.mem.hires_mode { video.render_hires_frame(&machine.mem, &char_rom); }
+        else { video.render_lores_frame(&machine.mem, &char_rom); }
 
-                        println!(
-                            "Disk: T{} Index={} Latch={:02X}",
-                            machine.mem.disk2.current_track,
-                            machine.mem.disk2.byte_index,
-                            machine.mem.disk2.data_latch
-                        );
-                        println!("Memory at $0800: {}", row_data);
-                        println!("Vectors at $03D0: {}", vec_data);
-                        println!("Buffer at $0200: {}", buf_data);
-                        println!(
-                            "CPU PC: {:04X} A:{:02X} X:{:02X} Y:{:02X} S:{:02X} P:{:02X}",
-                            machine.cpu.pc,
-                            machine.cpu.a,
-                            machine.cpu.x,
-                            machine.cpu.y,
-                            machine.cpu.sp,
-                            machine.cpu.status.to_byte()
-                        );
-                    }
-                }
-            }
-        }
-
-        // Render the Screen
-        if machine.mem.text_mode {
-            video.render_text_frame(&machine.mem, &char_rom);
-        } else if machine.mem.hires_mode {
-            video.render_hires_frame(&machine.mem, &char_rom);
-        } else {
-            video.render_lores_frame(&machine.mem, &char_rom);
-        }
-
-        window
-            .update_with_buffer(&video.frame_buffer, SCREEN_WIDTH, SCREEN_HEIGHT)
-            .unwrap();
-
-        #[cfg(debug_assertions)]
-        if !turbo_mode && last_cycle.elapsed().as_secs() >= 1 {
-            // Print screen rows
-            for row in 0..24 {
-                let base: usize = 0x0400;
-                let block = row / 8;
-                let offset = row % 8;
-                let row_addr = base + offset * 128 + block * 40;
-                let mut line = String::new();
-                for col in 0..40 {
-                    let char_code = machine.mem.ram[row_addr + col];
-                    let ascii = char_code & 0x7F;
-                    if ascii >= 0x20 && ascii <= 0x7E {
-                        line.push(ascii as char);
-                    } else {
-                        line.push('.');
-                    }
-                }
-                if line.chars().any(|c| c != '.') {
-                    println!("Row {:2}: {}", row, line);
-                }
-            }
-            last_cycle = Instant::now();
-        }
+        window.update_with_buffer(&video.frame_buffer, SCREEN_WIDTH, SCREEN_HEIGHT).unwrap();
     }
 
-    // Save changes when closing the emulator
     if machine.mem.disk2.is_dirty {
         let path_to_save = config.last_disk_path.as_ref().unwrap_or(&dsk_path);
         if let Ok(new_disk) = apple2_core::nibble::denibblize_dsk(&machine.mem.disk2.tracks) {
-            if let Err(e) = save_disk_image(path_to_save, &new_disk) {
-                println!("ERROR: Failed to save changes to current disk {:?}: {}", path_to_save.file_name().unwrap_or_default(), e);
-            } else {
-                println!("Saved changes to disk on exit: {:?}", path_to_save.file_name().unwrap_or_default());
-            }
+            let _ = save_disk_image(path_to_save, &new_disk);
         }
     }
 }
