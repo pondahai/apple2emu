@@ -205,10 +205,10 @@ mod tests {
     }
 }
 
-fn update_window_title(window: &mut Window, speed_multiplier: u32, auto_disk_turbo_active: bool) {
-    let title = if auto_disk_turbo_active {
-        "Apple II Emulator (Rust no_std core) [AUTO TURBO UNTHROTTLED]".to_string()
-    } else if speed_multiplier > 1 {
+fn update_window_title(window: &mut Window, speed_multiplier: f32, auto_disk_turbo_active: bool) {
+    let title = if auto_disk_turbo_active || speed_multiplier == 0.0 {
+        "Apple II Emulator (Rust no_std core) [TURBO FULL UNTHROTTLED]".to_string()
+    } else if speed_multiplier > 1.0 {
         format!(
             "Apple II Emulator (Rust no_std core) [MANUAL TURBO x{}]",
             speed_multiplier
@@ -221,7 +221,8 @@ fn update_window_title(window: &mut Window, speed_multiplier: u32, auto_disk_tur
 
 fn main() {
     const BASE_FRAME_CYCLES: u32 = 17_050;
-    const MAX_SPEED_MULTIPLIER: u32 = 5;
+    let speed_steps: [f32; 6] = [1.0, 1.2, 1.5, 2.0, 5.0, 0.0];
+    let mut speed_index: usize = 0;
 
     println!("Starting Apple II Emulator targeting Windows (minifb) and core no_std...");
 
@@ -352,7 +353,7 @@ fn main() {
     let mut last_right_mouse_down = false;
     let mut clipboard = arboard::Clipboard::new().ok();
     
-    let mut speed_multiplier: u32 = 1;
+    let mut speed_multiplier: f32 = 1.0;
     let mut dc_filter_x1: f32 = 0.0;
     let mut dc_filter_y1: f32 = 0.0;
     let mut audio_mixer = AudioMixerState::new(machine.mem.speaker);
@@ -498,7 +499,8 @@ fn main() {
 
         let f4_down = window.is_key_down(Key::F4);
         if f4_down && !last_f4_down {
-            speed_multiplier = if speed_multiplier >= MAX_SPEED_MULTIPLIER { 1 } else { speed_multiplier + 1 };
+            speed_index = (speed_index + 1) % speed_steps.len();
+            speed_multiplier = speed_steps[speed_index];
         }
         last_f4_down = f4_down;
 
@@ -526,13 +528,20 @@ fn main() {
         let mut frame_cycles = 0;
         let mut audio_samples: Vec<f32> = Vec::with_capacity(1500);
         let auto_disk_turbo_active = machine.mem.disk2.motor_on;
-        let effective_speed_multiplier = if auto_disk_turbo_active { MAX_SPEED_MULTIPLIER } else { speed_multiplier };
         
-        let turbo_mode = auto_disk_turbo_active || effective_speed_multiplier > 1;
-        let desired_fps = if auto_disk_turbo_active {
+        // If disk is on, we force FULL speed (unthrottled) for the best loading experience.
+        // Otherwise use the manual speed_multiplier set by F4.
+        let effective_speed_multiplier = if auto_disk_turbo_active {
+            0.0
+        } else {
+            speed_multiplier
+        };
+        
+        let is_full_speed = effective_speed_multiplier == 0.0;
+        let desired_fps = if is_full_speed {
             0 // Unthrottled
-        } else if turbo_mode {
-            120
+        } else if effective_speed_multiplier > 1.0 {
+            (60.0 * effective_speed_multiplier) as usize
         } else {
             60
         };
@@ -542,13 +551,16 @@ fn main() {
             current_target_fps = desired_fps;
         }
 
-        if last_title_speed_multiplier != speed_multiplier || last_title_auto_disk_turbo != auto_disk_turbo_active {
+        if (last_title_speed_multiplier - speed_multiplier).abs() > 0.001 || last_title_auto_disk_turbo != auto_disk_turbo_active {
             update_window_title(&mut window, speed_multiplier, auto_disk_turbo_active);
             last_title_speed_multiplier = speed_multiplier;
             last_title_auto_disk_turbo = auto_disk_turbo_active;
         }
 
-        let target_cycles = BASE_FRAME_CYCLES * effective_speed_multiplier;
+        // For unthrottled mode, we still run one "normal" frame's worth of cycles per loop 
+        // to keep UI and audio processing smooth, but with window FPS limit removed.
+        let run_multiplier = if is_full_speed { 1.0 } else { effective_speed_multiplier };
+        let target_cycles = (BASE_FRAME_CYCLES as f32 * run_multiplier) as u32;
         while frame_cycles < target_cycles {
             let cycles = machine.step();
             frame_cycles += cycles;
