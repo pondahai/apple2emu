@@ -332,8 +332,8 @@ impl Memory for Apple2Memory {
             // Hardware I/O Space (Soft Switches)
             0xC000..=0xCFFF => {
                 match addr {
-                    // Keyboard Clear Strobe (also on read, but write triggers too)
-                    0xC010 => {
+                    // Any write to $C010-$C01F clears the keyboard strobe
+                    0xC010..=0xC01F => {
                         self.keyboard_latch &= 0x7F; // Clear highest bit
                     }
                     // Language Card Soft Switches

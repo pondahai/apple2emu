@@ -407,6 +407,8 @@ impl CPU {
         let sum = a as u16 + value as u16 + carry_in as u16;
         let binary_result = sum as u8;
 
+        // NMOS 6502: N and Z flags are set based on the BINARY sum, not decimal
+        self.update_zero_and_negative_flags(binary_result);
         self.status.v = (a ^ binary_result) & (value ^ binary_result) & 0x80 != 0;
 
         let mut lo = (a & 0x0F) + (value & 0x0F) + carry_in;
@@ -423,7 +425,6 @@ impl CPU {
         }
 
         self.a = (hi << 4) | (lo & 0x0F);
-        self.update_zero_and_negative_flags(self.a);
     }
 
     fn sbc_decimal(&mut self, value: u8) {
@@ -432,6 +433,8 @@ impl CPU {
         let diff = a as i16 - value as i16 - (1 - carry_in) as i16;
         let binary_result = diff as u8;
 
+        // NMOS 6502: N and Z flags are set based on the BINARY difference, not decimal
+        self.update_zero_and_negative_flags(binary_result);
         self.status.v = ((a ^ value) & (a ^ binary_result) & 0x80) != 0;
 
         let mut lo = (a & 0x0F) as i16 - (value & 0x0F) as i16 - (1 - carry_in) as i16;
@@ -448,6 +451,5 @@ impl CPU {
         }
 
         self.a = (((hi as u8) << 4) & 0xF0) | ((lo as u8) & 0x0F);
-        self.update_zero_and_negative_flags(self.a);
     }
 }
