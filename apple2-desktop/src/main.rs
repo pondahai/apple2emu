@@ -465,6 +465,7 @@ fn main() {
                 if !cached_disk_rom.is_empty() { machine.mem.disk2.load_boot_rom(&cached_disk_rom); }
                 if let Some(ref disk) = cached_disk_image { machine.mem.disk2.load_disk(disk); }
                 machine.reset();
+                key_queue.clear();
             }
             sink = rebuild_sink(audio_handle.as_ref());
             audio_mixer.reset_at(machine.total_cycles as f64, cycles_per_sample, machine.mem.speaker);

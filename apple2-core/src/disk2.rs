@@ -123,7 +123,7 @@ impl Disk2 {
         if self.motor_on || self.motor_timer_cycles > 0 {
             if switch == 0x0C {
                 // $C0EC (Q6_OFF): Read Data
-                if !self.is_disk_loaded || self.spin_up_cycles > 0 {
+                if !self.is_disk_loaded {
                     return 0x00;
                 }
 
@@ -180,9 +180,9 @@ impl Disk2 {
             }
             0x08 => self.motor_on = false,
             0x09 => {
-                // If motor was completely off, start spin-up delay
+                // If motor was completely off, start shorter spin-up delay
                 if !self.motor_on && self.motor_timer_cycles == 0 {
-                    self.spin_up_cycles = 153_450; // 150ms @ 1.023 MHz
+                    self.spin_up_cycles = 51_150; // 50ms @ 1.023 MHz
                 }
                 self.motor_on = true;
             }

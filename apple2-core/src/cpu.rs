@@ -1380,6 +1380,9 @@ impl CPU {
             // KIL / JAM (Illegal: halt until reset)
             0x02 | 0x12 | 0x22 | 0x32 | 0x42 | 0x52 | 0x62 | 0x72 | 0x92 | 0xB2
             | 0xD2 | 0xF2 => {
+                if !self.jammed {
+                    println!("CPU JAMMED (KIL instruction) at PC: ${:04X}", self.pc.wrapping_sub(1));
+                }
                 self.jammed = true;
                 self.pc = self.pc.wrapping_sub(1);
                 1
