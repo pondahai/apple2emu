@@ -270,8 +270,8 @@ impl Memory for Apple2Memory {
                         0
                     } // Hi-Res
 
-                    // Speaker toggle ($C030)
-                    0xC030 => {
+                    // Speaker toggle ($C030-$C03F)
+                    0xC030..=0xC03F => {
                         self.toggle_speaker(access_cycle);
                         0
                     }
@@ -375,8 +375,8 @@ impl Memory for Apple2Memory {
                         self.hires_mode = true;
                     } // Hi-Res
 
-                    // Speaker toggle ($C030)
-                    0xC030 => {
+                    // Speaker toggle ($C030-$C03F)
+                    0xC030..=0xC03F => {
                         self.toggle_speaker(access_cycle);
                     }
                     0xC070 => {

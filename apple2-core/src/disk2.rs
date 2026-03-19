@@ -4,7 +4,9 @@ use alloc::vec::Vec;
 
 pub struct Disk2 {
     pub rom: [u8; 256],
-    pub motor_on: bool,
+    pub motor_on: bool, // This is the software-controlled flip-flop ($C0E8/$C0E9)
+    pub motor_timer_cycles: u32, // Hardware 1-second timer re-triggered by any I/O access
+    pub spin_up_cycles: u32,     // 150ms delay before data is valid
     pub drive_select: u8,
     pub write_mode: bool,
     pub load_mode: bool,
@@ -35,13 +37,15 @@ pub struct Disk2 {
 
 impl Disk2 {
     pub fn new() -> Self {
-        let mut tracks = Vec::with_capacity(35);
-        for _ in 0..35 {
+        let mut tracks = Vec::with_capacity(40);
+        for _ in 0..40 {
             tracks.push(TrackData::new());
         }
         Self {
             rom: [0; 256],
             motor_on: false,
+            motor_timer_cycles: 0,
+            spin_up_cycles: 0,
             drive_select: 1,
             write_mode: false,
             load_mode: false,
@@ -115,10 +119,11 @@ impl Disk2 {
 
         let switch = addr & 0x0F;
 
-        if self.motor_on {
+        // Drive motor is active if the flip-flop is on OR the 1-second timer is running
+        if self.motor_on || self.motor_timer_cycles > 0 {
             if switch == 0x0C {
                 // $C0EC (Q6_OFF): Read Data
-                if !self.is_disk_loaded {
+                if !self.is_disk_loaded || self.spin_up_cycles > 0 {
                     return 0x00;
                 }
 
@@ -160,6 +165,10 @@ impl Disk2 {
 
     fn handle_io(&mut self, addr: u16) {
         let switch = (addr & 0x0F) as usize;
+
+        // Any access to $C0E0-$C0EF re-triggers the 1-second motor-on timer
+        self.motor_timer_cycles = 1_023_000; // ~1 second @ 1.023 MHz
+
         match switch {
             0x00..=0x07 => {
                 let phase = switch >> 1;
@@ -170,7 +179,13 @@ impl Disk2 {
                 }
             }
             0x08 => self.motor_on = false,
-            0x09 => self.motor_on = true,
+            0x09 => {
+                // If motor was completely off, start spin-up delay
+                if !self.motor_on && self.motor_timer_cycles == 0 {
+                    self.spin_up_cycles = 153_450; // 150ms @ 1.023 MHz
+                }
+                self.motor_on = true;
+            }
             0x0A => self.drive_select = 1,
             0x0B => self.drive_select = 2,
             0x0C => {
@@ -227,7 +242,8 @@ impl Disk2 {
             }
         }
 
-        self.current_qtr_track = target_qtr.clamp(0, 34 * 4);
+        // Expanded to 40 tracks (0-39)
+        self.current_qtr_track = target_qtr.clamp(0, 39 * 4);
         let next_track = (self.current_qtr_track / 4) as usize;
         if next_track != self.current_track {
             self.current_track = next_track;
@@ -236,10 +252,19 @@ impl Disk2 {
     }
 
     pub fn tick(&mut self, cycles: u32) {
-        if self.motor_on && self.is_disk_loaded {
+        // Decrement timers
+        self.motor_timer_cycles = self.motor_timer_cycles.saturating_sub(cycles);
+        self.spin_up_cycles = self.spin_up_cycles.saturating_sub(cycles);
+
+        let motor_is_spinning = self.motor_on || self.motor_timer_cycles > 0;
+
+        if motor_is_spinning && self.is_disk_loaded {
             self.cycles_accumulator += cycles;
 
-            if self.load_mode && !self.write_mode {
+            // If we are still spinning up, no data is transferred, but disk rotates
+            let can_read_write = self.spin_up_cycles == 0;
+
+            if can_read_write && self.load_mode && !self.write_mode {
                 // Q7=1,Q6=0: shift write stream at bit granularity (4 cycles/bit).
                 while self.cycles_accumulator >= 4 {
                     self.cycles_accumulator -= 4;
@@ -262,7 +287,7 @@ impl Disk2 {
                         self.byte_index = (self.byte_index + 1) % track.length;
                     }
                 }
-            } else if !self.load_mode && !self.write_mode {
+            } else if can_read_write && !self.load_mode && !self.write_mode {
                 while self.cycles_accumulator >= 4 {
                     self.cycles_accumulator -= 4;
                     let track = &self.tracks[self.current_track];
@@ -314,6 +339,7 @@ impl Disk2 {
                     }
                 }
             } else {
+                // Spinning but no data (either spin-up or other state)
                 let step_cycles = if self.bitstream_read_mode { 4 } else { 32 };
                 while self.cycles_accumulator >= step_cycles {
                     self.cycles_accumulator -= step_cycles;
@@ -326,8 +352,6 @@ impl Disk2 {
                         } else {
                             let track_length = track.length;
                             let read_length = track.read_length;
-                            // Non-write states still rotate the disk, but read-only geometry
-                            // can stretch the apparent revolution length without changing bytes.
                             self.advance_read_rotation(track_length, read_length);
                         }
                     }

@@ -15,6 +15,19 @@ mod tests {
     }
 
     #[test]
+    fn speaker_toggle_handles_mirrored_addresses() {
+        let mut mem = Apple2Memory::new();
+
+        mem.begin_cpu_step(100);
+        let _ = mem.read(0xC031); // Toggle via $C031
+        let _ = mem.write(0xC03F, 0x00); // Toggle via $C03F
+        mem.end_cpu_step();
+
+        assert!(!mem.speaker); // Two toggles result in original state (false)
+        assert_eq!(mem.take_speaker_toggle_cycles(), vec![100, 101]);
+    }
+
+    #[test]
     fn speaker_toggle_cycle_advances_with_each_bus_access() {
         let mut mem = Apple2Memory::new();
 
