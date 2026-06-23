@@ -47,9 +47,10 @@ The project is structured as a Rust workspace with two primary crates:
 - **Clipboard**: `Ctrl + V` (Windows) or `Right-Click` triggers a clipboard paste, injecting text into the keyboard latch.
 
 ## Current Project Status
-- **Disk II**: Stable. Supports reading/writing and boots DOS 3.3.
-- **CPU**: Mostly complete, but some bottlenecks remain in Stage 2 boot (specifically around `$0BB8`). Investigation into subtle flag differences or missing illegal opcode side effects is ongoing.
-- **Graphics**: Text, Lo-Res, and Hi-Res (with NTSC artifact color) are fully implemented.
+- **Disk II**: Stable. Supports reading/writing, boots DOS 3.3, and now boots *The Goonies* (custom RWTS, T0-T23 load + joystick calibration + T24-T27 level load into HIRES).
+- **CPU**: Mostly complete. Branch-cycle timing corrected (a taken branch was over-counted by 1 cycle, which skewed all timing/audio pitch). Remaining edge cases are unstable undocumented opcodes and bus-level corner timing.
+- **Graphics**: Text, Lo-Res, and Hi-Res (with NTSC artifact color) are fully implemented, including text/lores **page 2** ($0800) via the PAGE2 soft switch.
+- **Tooling**: `cargo run --bin boot_smoke` headlessly boots a DSK and dumps the seek sequence, video mode, hot PCs and both text pages — useful for reproducing disk/timing/video issues offline.
 
 ## Key Files
 - `apple2-core/src/cpu.rs`: Main CPU fetch/execute loop and opcode dispatch.

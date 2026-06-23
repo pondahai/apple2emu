@@ -118,3 +118,12 @@
     * **清空鍵盤佇列**：在 `F2` 路徑中加入 `key_queue.clear()`，確保舊狀態不殘留。
     * **馬達啟動優化**：將延遲從 150ms 縮短為 **50ms**，並在啟動期間允許數據讀取，解決部分遊戲（如 *Beyond Castle Wolfenstein*）在啟動檢查中超時或卡死的問題。
     * **CPU 狀態監控**：當 CPU 遇到 `KIL` 指令當機時，會主動印出 PC 位址以便開發者定位問題。
+
+## 24. 自 PicoApple2 回移植：分支週期修正、文字頁 2 與 Goonies 開機 (2026-06-23)
+本輪將 PicoApple2 分支累積的進展回移植到本桌面核心。經分析發現真正可移植的精華並非磁碟程式碼本身，而是兩個跨平台的時序/顯示修正；PicoApple2 的磁碟「換軌保相位」修正因兩邊讀取模型不同而**不需要**移植。
+
+* **CPU 分支週期修正 (`cpu.rs`)**：8 個分支指令 (BCC/BCS/BEQ/BNE/BPL/BMI/BVC/BVS) 的 base cycle 原為 `if c { 3 } else { 2 }`，與 `branch()` 回傳的 +1(取分支)/+2(跨頁)疊加後，**成立的分支被多算 1 cycle**(取分支 4、跨頁 5，應為 3/4)。改為固定 base `2`。此 bug 會讓所有數週期程式偏慢、音高偏低、並擾動磁碟 32-cycle 讀取窗。新增回歸測試 `test_branch_cycle_timing_taken_adds_one_not_two`。
+* **文字頁 2 渲染 (`video.rs`)**：`get_text_row_addr` 新增 `page2` 參數（$0400/$0800），由 PAGE2 軟開關 (`$C054`/`$C055`) 驅動，TEXT 與 LORES 模式同步支援。先前只認頁 1，導致寫入文字頁 2 的軟體（如 *The Goonies* 的搖桿校正畫面 "HOLD JOYSTICK..."）看不到。新增回歸測試 `text_row_addr_selects_page1_or_page2`。
+* **Headless 開機驗證工具 (`apple2-desktop/src/bin/boot_smoke.rs`)**：PicoApple2 `boot_test.rs` 的桌面對應版，用原生 `Apple2Machine` API 無視窗開機任意 DSK，輸出 seek 序列、CPU 熱點、video 模式、馬達狀態與**文字頁 1+頁 2 雙頁** dump。支援 `BOOT_DSK`/`BOOT_SECS`/`BOOT_PRESS_BTN`(搖桿校正注入)/`BOOT_TYPE`。
+* **《The Goonies》完整開機(本核心首次)**：以上兩項修正搭配既有馬達慣性 (`motor_timer_cycles`)，使 goonies 載入 T0-T23 → 搖桿校正(文字頁 2)→ 按鈕通過後載入 T24-T27 → 進入純 HIRES 遊戲畫面。主機端 (`boot_smoke`) 與實機視窗皆驗證通過；MASTER.DSK 開機回歸正常。
+* **未移植(刻意)**：PicoApple2 的「換軌保留旋轉相位」修正僅針對其 byte-level 讀取模型(換軌 `byte_index` 歸零會破壞 loader)。本核心採 bit-level 內部狀態讀取模型，`reset_rotation_state()` 對 goonies 不構成問題，強行套用反而可能回歸，故保留現有讀取模型。

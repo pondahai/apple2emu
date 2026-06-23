@@ -45,13 +45,17 @@ impl Video {
         }
     }
 
-    /// Calculate the memory address of the first character of a given row
-    fn get_text_row_addr(row: usize) -> u16 {
+    /// Calculate the memory address of the first character of a given row.
+    /// `page2` selects the display page (PAGE2 soft switch $C054/$C055):
+    /// page 1 lives at $0400 and page 2 at $0800. This governs both TEXT and
+    /// LORES, which share the same screen memory. Some games (e.g. The Goonies'
+    /// joystick-calibration screen) draw to text page 2.
+    fn get_text_row_addr(row: usize, page2: bool) -> u16 {
         // Apple II text rows are weirdly interleaved:
         // Row 0 = 0x0400, Row 1 = 0x0480, Row 2 = 0x0500...
         // Row 8 = 0x0428, Row 9 = 0x04A8...
         // Row 16 = 0x0450...
-        let base = 0x0400;
+        let base: u16 = if page2 { 0x0800 } else { 0x0400 };
         let block = row / 8;
         let offset = row % 8;
         base + (offset * 128) as u16 + (block * 40) as u16
@@ -71,7 +75,7 @@ impl Video {
             > 266;
 
         for row in 0..24 {
-            let row_addr = Self::get_text_row_addr(row);
+            let row_addr = Self::get_text_row_addr(row, mem.page2);
 
             for col in 0..40 {
                 // Read the character code from Video RAM
@@ -156,7 +160,7 @@ impl Video {
         let black_color = 0x00_00_00_00; // ARGB Black
 
         for row in 0..24 {
-            let row_addr = Self::get_text_row_addr(row);
+            let row_addr = Self::get_text_row_addr(row, mem.page2);
 
             // Handle Mixed Mode (bottom 4 rows are text)
             if mem.mixed_mode && row >= 20 {
@@ -254,7 +258,7 @@ impl Video {
             if mem.mixed_mode && row >= 160 {
                 let text_row = row / 8;
                 let char_y = row % 8;
-                let row_addr = Self::get_text_row_addr(text_row);
+                let row_addr = Self::get_text_row_addr(text_row, mem.page2);
 
                 for col in 0..40 {
                     let char_code = mem.ram[(row_addr + col as u16) as usize];
@@ -336,5 +340,31 @@ impl Video {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Video;
+
+    #[test]
+    fn text_row_addr_selects_page1_or_page2() {
+        // Page 1 lives at $0400, page 2 at $0800; the $400 offset is the only
+        // difference between the two (the interleaving is identical).
+        for row in 0..24 {
+            let p1 = Video::get_text_row_addr(row, false);
+            let p2 = Video::get_text_row_addr(row, true);
+            assert_eq!(p2, p1 + 0x0400, "row {row} page2 should be page1 + $400");
+        }
+
+        // Spot-check a few interleaved rows on page 1.
+        assert_eq!(Video::get_text_row_addr(0, false), 0x0400);
+        assert_eq!(Video::get_text_row_addr(1, false), 0x0480);
+        assert_eq!(Video::get_text_row_addr(8, false), 0x0428);
+        assert_eq!(Video::get_text_row_addr(16, false), 0x0450);
+
+        // And the corresponding page-2 addresses.
+        assert_eq!(Video::get_text_row_addr(0, true), 0x0800);
+        assert_eq!(Video::get_text_row_addr(8, true), 0x0828);
     }
 }

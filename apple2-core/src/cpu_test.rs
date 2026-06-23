@@ -481,4 +481,41 @@ mod tests {
         cpu.step(&mut mem);
         assert_eq!(mem.reads, vec![0x0000, 0x0001, 0x0002, 0x1200, 0x1300]);
     }
+
+    // Regression: a taken branch must cost 3 cycles (4 on a page cross), not 4/5.
+    // The base cost is 2; branch() supplies +1 for taken and +1 more for a page
+    // cross. Returning 3 as the base for a taken branch double-counted the taken
+    // penalty and made every cycle-counted routine run ~one cycle/branch too slow.
+    #[test]
+    fn test_branch_cycle_timing_taken_adds_one_not_two() {
+        // BNE not taken (Z set): 2 cycles, PC just past the operand.
+        let mut cpu = CPU::new();
+        let mut mem = TestMemory::new();
+        cpu.pc = 0x1000;
+        cpu.status.z = true; // BNE branches when Z is clear -> not taken
+        mem.ram[0x1000] = 0xD0;
+        mem.ram[0x1001] = 0x10;
+        assert_eq!(cpu.step(&mut mem), 2);
+        assert_eq!(cpu.pc, 0x1002);
+
+        // BNE taken, same page: 3 cycles.
+        let mut cpu = CPU::new();
+        let mut mem = TestMemory::new();
+        cpu.pc = 0x1000;
+        cpu.status.z = false;
+        mem.ram[0x1000] = 0xD0;
+        mem.ram[0x1001] = 0x10;
+        assert_eq!(cpu.step(&mut mem), 3);
+        assert_eq!(cpu.pc, 0x1012);
+
+        // BNE taken, crossing a page boundary: 4 cycles.
+        let mut cpu = CPU::new();
+        let mut mem = TestMemory::new();
+        cpu.pc = 0x10F0;
+        cpu.status.z = false;
+        mem.ram[0x10F0] = 0xD0;
+        mem.ram[0x10F1] = 0x70;
+        assert_eq!(cpu.step(&mut mem), 4);
+        assert_eq!(cpu.pc, 0x1162);
+    }
 }
