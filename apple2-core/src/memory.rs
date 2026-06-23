@@ -190,6 +190,119 @@ impl Apple2Memory {
             0x00
         }
     }
+
+    /// Address the video scanner is fetching from RAM at the given CPU cycle.
+    ///
+    /// Ported from AppleWin's `VideoGetScannerAddress`, which implements Jim
+    /// Sather's model (Understanding the Apple IIe, ch.5). NTSC timing: 65
+    /// horizontal clocks per scan line, 262 scan lines per frame. The scanner
+    /// keeps generating addresses during HBL/VBL, which is exactly why the
+    /// floating bus is useful as a randomness source — its value tracks the
+    /// beam position and so changes from one read to the next.
+    fn video_scanner_address(&self, cycle: u64) -> u16 {
+        const H_CLOCKS: u64 = 65;
+        const H_PE_CLOCK: u64 = 40; // last HBL clock
+        const H_PRESET_CLOCK: u64 = 41; // visible region begins
+        const H_CLOCK0_STATE: i32 = 0x18;
+        const V_LINE0_STATE: i32 = 0x100;
+        const V_PRESET_LINE: u64 = 256;
+        const SCAN_LINES: u64 = 262; // NTSC
+        const SCAN_CYCLES: u64 = SCAN_LINES * H_CLOCKS;
+
+        let n_cycles = cycle % SCAN_CYCLES;
+
+        // Horizontal counter state (h_0..h_5).
+        let n_hclock = (n_cycles + H_PE_CLOCK) % H_CLOCKS;
+        let mut n_hstate = H_CLOCK0_STATE + n_hclock as i32;
+        if n_hclock >= H_PRESET_CLOCK {
+            n_hstate -= 1;
+        }
+        let h_0 = (n_hstate >> 0) & 1;
+        let h_1 = (n_hstate >> 1) & 1;
+        let h_2 = (n_hstate >> 2) & 1;
+        let h_3 = (n_hstate >> 3) & 1;
+        let h_4 = (n_hstate >> 4) & 1;
+        let h_5 = (n_hstate >> 5) & 1;
+
+        // Vertical counter state (v_a..v_5).
+        let n_vline = n_cycles / H_CLOCKS;
+        let mut n_vstate = V_LINE0_STATE + n_vline as i32;
+        if n_vline >= V_PRESET_LINE {
+            n_vstate -= SCAN_LINES as i32;
+        }
+        let v_a = (n_vstate >> 0) & 1;
+        let v_b = (n_vstate >> 1) & 1;
+        let v_c = (n_vstate >> 2) & 1;
+        let v_0 = (n_vstate >> 3) & 1;
+        let v_1 = (n_vstate >> 4) & 1;
+        let v_2 = (n_vstate >> 5) & 1;
+        let v_3 = (n_vstate >> 6) & 1;
+        let v_4 = (n_vstate >> 7) & 1;
+
+        let mut hires = self.hires_mode && !self.text_mode;
+        let page2 = self.page2;
+        // 80STORE is an Apple //e feature; on the II/II+ it is always off.
+
+        // In mixed mode the bottom four text rows fetch from the text page.
+        if hires && self.mixed_mode && v_4 != 0 && v_2 != 0 {
+            hires = false;
+        }
+
+        // Sather's 4-bit "sum" that forms address bits A3..A6.
+        let addend0 = 0x0D;
+        let addend1 = (h_5 << 2) | (h_4 << 1) | (h_3 << 0);
+        let addend2 = (v_4 << 3) | (v_3 << 2) | (v_4 << 1) | (v_3 << 0);
+        let sum = (addend0 + addend1 + addend2) & 0x0F;
+
+        let mut addr_h: u16 = 0;
+        addr_h |= (h_0 as u16) << 0;
+        addr_h |= (h_1 as u16) << 1;
+        addr_h |= (h_2 as u16) << 2;
+        addr_h |= (sum as u16) << 3;
+
+        if !hires {
+            // Apple II/II+: during HBL the text/lores scanner addresses the
+            // $1000/$1800 region (no display there, but the bus still carries it).
+            if h_5 == 0 && (h_4 == 0 || h_3 == 0) {
+                addr_h |= 1 << 12;
+            }
+        }
+
+        let mut addr_v: u16 = 0;
+        addr_v |= (v_0 as u16) << 7;
+        addr_v |= (v_1 as u16) << 8;
+        addr_v |= (v_2 as u16) << 9;
+
+        // With 80STORE off: p2a selects page 1, p2b selects page 2.
+        let p2a = if !page2 { 1u16 } else { 0 };
+        let p2b = if page2 { 1u16 } else { 0 };
+
+        let mut addr_p: u16 = 0;
+        if hires {
+            addr_v |= (v_a as u16) << 10;
+            addr_v |= (v_b as u16) << 11;
+            addr_v |= (v_c as u16) << 12;
+            addr_p |= p2a << 13; // $2000
+            addr_p |= p2b << 14; // $4000
+        } else {
+            addr_p |= p2a << 10; // $0400
+            addr_p |= p2b << 11; // $0800
+        }
+
+        addr_p | addr_v | addr_h
+    }
+
+    /// Value seen when reading an undriven `$C0xx` location: the byte the video
+    /// scanner is fetching this cycle. Games (e.g. Castle Wolfenstein) use this
+    /// as their only hardware randomness source — for explosion white-noise and
+    /// for combat hit/penetration rolls. Returning a constant here collapses the
+    /// noise to a single tone and makes every roll land the same way.
+    fn floating_bus(&self, access_cycle: Option<u64>) -> u8 {
+        let cycle = self.current_io_cycle(access_cycle);
+        let addr = self.video_scanner_address(cycle) as usize;
+        // Every scanner address falls within the 48K main RAM; guard anyway.
+        *self.ram.get(addr).unwrap_or(&0)
+    }
 }
 
 // Memory map implementation specific for Apple II
@@ -240,48 +353,50 @@ impl Memory for Apple2Memory {
                             self.lc_write_enable = false;
                         }
 
-                        0 // Normally this floats, return 0
+                        self.floating_bus(access_cycle) // read floats
                     }
                     // Disk II Controller (Slot 6)
                     0xC0E0..=0xC0EF => self.disk2.read_io(addr),
                     // Video Soft Switches ($C050 - $C057)
                     0xC050 => {
                         self.text_mode = false;
-                        0
+                        self.floating_bus(access_cycle)
                     } // Graphics Mode
                     0xC051 => {
                         self.text_mode = true;
-                        0
+                        self.floating_bus(access_cycle)
                     } // Text Mode
                     0xC052 => {
                         self.mixed_mode = false;
-                        0
+                        self.floating_bus(access_cycle)
                     } // Full Screen
                     0xC053 => {
                         self.mixed_mode = true;
-                        0
+                        self.floating_bus(access_cycle)
                     } // Mixed Mode
                     0xC054 => {
                         self.page2 = false;
-                        0
+                        self.floating_bus(access_cycle)
                     } // Page 1
                     0xC055 => {
                         self.page2 = true;
-                        0
+                        self.floating_bus(access_cycle)
                     } // Page 2
                     0xC056 => {
                         self.hires_mode = false;
-                        0
+                        self.floating_bus(access_cycle)
                     } // Lo-Res
                     0xC057 => {
                         self.hires_mode = true;
-                        0
+                        self.floating_bus(access_cycle)
                     } // Hi-Res
 
-                    // Speaker toggle ($C030-$C03F)
+                    // Speaker toggle ($C030-$C03F). The read both clicks the
+                    // speaker and returns the floating bus; noise routines read
+                    // here in a timing loop and use the value as randomness.
                     0xC030..=0xC03F => {
                         self.toggle_speaker(access_cycle);
-                        0
+                        self.floating_bus(access_cycle)
                     }
 
                     // Slot 6 ROM
@@ -297,8 +412,8 @@ impl Memory for Apple2Memory {
                         0x00
                     }
 
-                    // For now, other I/O returns 0 (Video switches, Disk II, etc.)
-                    _ => 0,
+                    // Any other undriven I/O location reads the floating bus.
+                    _ => self.floating_bus(access_cycle),
                 }
             }
 

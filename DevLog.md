@@ -141,3 +141,15 @@
 * **修正**：只有 `$C08x` 存取能動 pre-write 正反器(對齊 PicoApple2,其 `read()`/`write()` 在 `$C08x` 以外從不清除)。一併移除 `write()` 對每次寫入的無條件歸零(會破壞「兩次讀取間夾一個 STA」的解鎖序列)。
 * **驗證**：Rescue Raiders 開進 HIRES 遊戲(顯示 "64K");MASTER.DSK(`]` 提示)、The Goonies 回歸正常;`apple2-core` 49 項測試全過。
 * **工具強化 (`boot_smoke.rs`)**：新增 `BOOT_TRACE_AT`(指定起始秒)、`BOOT_TRACE_LO`/`BOOT_TRACE_HI`(PC 範圍過濾),便於擷取「失敗瞬間」的控制流而不被內層輪詢迴圈淹沒。
+
+## 26. Floating Bus(浮空匯流排)實作:《德軍總部》爆炸聲與防彈背心修復 (2026-06-23)
+本輪補上先前完全缺失的 **floating bus** 模擬。詳細原理筆記見 [`FLOATING_BUS.md`](FLOATING_BUS.md)。
+
+* **症狀(《德軍總部》)**:① 爆炸聲從白雜訊塌成單音;② 防彈背心失效(玩家/NPC 一發就傷到)。兩者共通點是**都依賴同一個亂數源**。
+* **根因 (`memory.rs`)**:Apple II 沒有 RNG,遊戲靠讀未驅動的 `$C0xx` 拿 **floating bus**(影像電路上半 cycle 殘留在資料匯流排上的畫面位元組)當亂數。原本所有未驅動 `$C0xx` 讀取一律回傳常數 `0` → 亂數恆為 0 → 規律 toggle 喇叭(單音)、擲骰永遠同一邊(背心穿透)。
+* **修正**:
+  * 新增 `video_scanner_address(cycle)`——移植自 AppleWin `VideoGetScannerAddress`(Jim Sather《Understanding the Apple IIe》ch.5 模型;NTSC 65 clocks/線 × 262 線,H/V counter → 位址,含 HBL/VBL)。依目前 text/hires/page2/mixed 狀態算出影像掃描器此刻指向的 RAM 位址。
+  * 新增 `floating_bus(cycle)`——回傳該掃描位址的 RAM 內容。
+  * 將回傳寫死 `0` 的未驅動 I/O 全部改走 floating bus:`$C050`–`$C057`(影像開關)、`$C030`–`$C03F`(喇叭,讀取同時 click 並回傳浮空值——雜訊程式正是在此計時迴圈取亂數)、`$C080`–`$C08F`(LC 開關)、萬用 fallback。**所有原本副作用(切模式 / toggle / LC bank 切換)全部保留,只改回傳值。**
+* **觀念釐清**:回傳值可用單一 `floating_bus()` 統一處理(不必逐位址對應);但 floating 值本身必須算掃描器位址(它是特定畫面 RAM 那一格,非隨機數);soft switch 的副作用仍須逐位址解碼,不能用 floating 取代。
+* **驗證**:`cargo test -p apple2-core` **50/50 通過**;新增 `undriven_io_reads_track_the_floating_bus`(RAM 填位址低位元組標記,連讀 `$C055` 200 次,確認回傳值隨 cycle 變動且取自 RAM,常數 stub 會令其失敗);實機視窗確認德軍總部爆炸聲恢復為白雜訊。

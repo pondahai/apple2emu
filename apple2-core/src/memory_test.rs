@@ -43,6 +43,36 @@ mod tests {
     }
 
     #[test]
+    fn undriven_io_reads_track_the_floating_bus() {
+        // Mark each RAM cell with its own low address byte so a floating-bus
+        // read returns the low byte of whatever address the video scanner is
+        // fetching this cycle.
+        let mut mem = Apple2Memory::new();
+        for (i, cell) in mem.ram.iter_mut().enumerate() {
+            *cell = i as u8;
+        }
+
+        // Read an undriven soft switch ($C055 = Page 2 select) once per cycle as
+        // the bus cycle advances. A constant-0 stub would return the same value
+        // every time; the floating bus must vary as the scanner moves.
+        mem.begin_cpu_step(0);
+        let mut values = vec![];
+        for _ in 0..200 {
+            values.push(mem.read(0xC055));
+        }
+        mem.end_cpu_step();
+
+        let first = values[0];
+        assert!(
+            values.iter().any(|&v| v != first),
+            "floating bus returned a constant ({:#04x}); randomness source is dead",
+            first
+        );
+        // And it must be reading real RAM, never a hardcoded sentinel.
+        assert!(values.iter().any(|&v| v != 0));
+    }
+
+    #[test]
     fn pushbutton_reads_set_bit7_when_pressed() {
         let mut mem = Apple2Memory::new();
         mem.set_joystick_state(127, 127, true, false);
