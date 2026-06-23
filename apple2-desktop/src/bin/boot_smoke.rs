@@ -41,7 +41,7 @@ fn decode_disk_image(path: &std::path::Path) -> Result<Vec<u8>, String> {
         .unwrap_or(false)
         || (raw.len() >= 2 && raw[0] == 0x1F && raw[1] == 0x8B);
 
-    let disk = if is_gz {
+    let mut disk = if is_gz {
         let mut out = Vec::new();
         flate2::read::GzDecoder::new(raw.as_slice())
             .read_to_end(&mut out)
@@ -51,12 +51,19 @@ fn decode_disk_image(path: &std::path::Path) -> Result<Vec<u8>, String> {
         raw
     };
 
-    if disk.len() != 143_360 {
-        return Err(format!(
-            "{}: size {} (expected 143360)",
-            path.display(),
-            disk.len()
-        ));
+    // Match the desktop frontend: accept images with up to 4096 bytes of
+    // trailing padding (some .dsk dumps have it) by trimming to 143360.
+    const EXPECTED: usize = 143_360;
+    if disk.len() < EXPECTED {
+        return Err(format!("{}: size {} (expected at least {EXPECTED})", path.display(), disk.len()));
+    }
+    if disk.len() > EXPECTED {
+        let trailing = disk.len() - EXPECTED;
+        if trailing > 4096 {
+            return Err(format!("{}: size {} (trailing {trailing} too large to trim)", path.display(), disk.len()));
+        }
+        println!("note: trimming {trailing} trailing byte(s) to {EXPECTED}");
+        disk.truncate(EXPECTED);
     }
     Ok(disk)
 }
@@ -139,6 +146,7 @@ fn main() {
         s => Some(s),
     };
     let type_keys = env::var("BOOT_TYPE").ok().map(|s| parse_type_string(&s)).unwrap_or_default();
+    let type_at_cycle = env_u64("BOOT_TYPE_AT", 0) * CPU_HZ as u64;
 
     let main_rom = std::fs::read(roms_dir.join("APPLE2PLUS.ROM"))
         .unwrap_or_else(|e| { eprintln!("read APPLE2PLUS.ROM: {e}"); process::exit(1); });
@@ -168,10 +176,21 @@ fn main() {
     let mut seek_seq: Vec<(u8, f64)> = Vec::new();
     let mut pc_hist: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
     let mut type_idx = 0usize;
+    // BOOT_TRACE=N: once typing starts, record up to N run-length-deduped PCs to
+    // reveal where control flow goes after a key is accepted.
+    let trace_cap = env_u64("BOOT_TRACE", 0) as usize;
+    let mut trace: Vec<u16> = Vec::new();
     let wall_start = std::time::Instant::now();
 
     while cycles < target {
+        let pc_before = machine.cpu.pc;
         cycles += machine.step() as u64;
+
+        if trace_cap > 0 && cycles >= type_at_cycle && trace.len() < trace_cap {
+            if trace.last() != Some(&pc_before) {
+                trace.push(pc_before);
+            }
+        }
 
         // Track seek sequence (record each whole-track change).
         let track = machine.mem.disk2.current_track as i32;
@@ -199,8 +218,8 @@ fn main() {
             }
         }
 
-        // Type keys once the keyboard latch strobe has been consumed.
-        if type_idx < type_keys.len() && (machine.mem.keyboard_latch & 0x80) == 0 {
+        // Type keys (after BOOT_TYPE_AT) once the latch strobe has been consumed.
+        if cycles >= type_at_cycle && type_idx < type_keys.len() && (machine.mem.keyboard_latch & 0x80) == 0 {
             machine.mem.keyboard_latch = (type_keys[type_idx] & 0x7F) | 0x80;
             type_idx += 1;
         }
@@ -241,6 +260,27 @@ fn main() {
     println!("hot PCs (last 2s): {}", hot_str.join(" "));
     if hot.len() <= 2 {
         println!("  (note: very few distinct PCs -> likely a tight wait/idle loop, e.g. BASIC ready)");
+    }
+
+    // BOOT_DUMP=HEXADDR,HEXLEN: hex-dump an arbitrary RAM range (for inspecting
+    // the code/data the machine is sitting in).
+    if let Ok(spec) = env::var("BOOT_DUMP") {
+        let parts: Vec<usize> = spec.split(',').filter_map(|s| usize::from_str_radix(s.trim(), 16).ok()).collect();
+        if let [start, len] = parts[..] {
+            println!();
+            for i in 0..len {
+                if i % 16 == 0 {
+                    print!("\n  {:04X}:", start + i);
+                }
+                print!(" {:02X}", machine.mem.ram[(start + i) & 0xFFFF]);
+            }
+            println!();
+        }
+    }
+
+    if !trace.is_empty() {
+        let t: Vec<String> = trace.iter().map(|pc| format!("{pc:04X}")).collect();
+        println!("\nPC trace after key ({}): {}", trace.len(), t.join(" "));
     }
 
     println!();
