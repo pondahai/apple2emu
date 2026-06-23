@@ -127,3 +127,17 @@
 * **Headless 開機驗證工具 (`apple2-desktop/src/bin/boot_smoke.rs`)**：PicoApple2 `boot_test.rs` 的桌面對應版，用原生 `Apple2Machine` API 無視窗開機任意 DSK，輸出 seek 序列、CPU 熱點、video 模式、馬達狀態與**文字頁 1+頁 2 雙頁** dump。支援 `BOOT_DSK`/`BOOT_SECS`/`BOOT_PRESS_BTN`(搖桿校正注入)/`BOOT_TYPE`。
 * **《The Goonies》完整開機(本核心首次)**：以上兩項修正搭配既有馬達慣性 (`motor_timer_cycles`)，使 goonies 載入 T0-T23 → 搖桿校正(文字頁 2)→ 按鈕通過後載入 T24-T27 → 進入純 HIRES 遊戲畫面。主機端 (`boot_smoke`) 與實機視窗皆驗證通過；MASTER.DSK 開機回歸正常。
 * **未移植(刻意)**：PicoApple2 的「換軌保留旋轉相位」修正僅針對其 byte-level 讀取模型(換軌 `byte_index` 歸零會破壞 loader)。本核心採 bit-level 內部狀態讀取模型，`reset_rotation_state()` 對 goonies 不構成問題，強行套用反而可能回歸，故保留現有讀取模型。
+
+## 25. 《Rescue Raiders》開機修正：Language Card 寫入解鎖雙讀 (2026-06-23)
+本輪解決 `DISK_LOADER_DEBUG.md` 唯一掛 OPEN 的 *Rescue Raiders*。**根因不在磁碟,而在 Language Card 寫入解鎖。**
+
+* **症狀**：按 ENTER 後載入一陣子(seek T21→T0),隨即跳回標題畫面無限循環。
+* **排除過程**：
+  1. 證實磁碟解碼**逐 byte 正確**($4000 = .dsk track21 sec0 完全一致)。
+  2. 證實 CPU 核心與 PicoApple2**功能相同**、兩邊 nibblizer **byte-for-byte 相同**。
+  3. 為 PicoApple2 桌面 `boot_test` 加上按鍵注入,確認**同一片 .dsk 在 PicoApple2 桌面核心可開進遊戲**(熱點 PC 落在 `$08xx`-`$09xx` 遊戲迴圈)。
+  4. 兩邊在同一模擬秒 dump 主記憶體 diff:標題列 `$07D0` 文字 apple2emu 顯示 **`48`**、PicoApple2 顯示 **`64`** → 直指 Language Card 偵測。
+* **根因 (`memory.rs`)**：LC 寫入解鎖需「連續兩次讀取奇數 `$C08x` 位址」(如 `LDA $C083` ×2)。原本 `read()` 用 `clear_pre_write` 旗標在**每次非 LC 讀取**都把 pre-write 正反器 (`lc_pre_write_switch`) 歸零 —— 而兩條 `LDA $C083` 之間 CPU 自己的**取指/取運算元**就是非 LC 讀取,於是正反器在第二次讀取前就被清掉,write-enable 永遠latch 不起來。遊戲開機的 RAM 偵測因此判定 48K(無語言卡)而非 64K,走了錯誤載入路徑後跳回標題。
+* **修正**：只有 `$C08x` 存取能動 pre-write 正反器(對齊 PicoApple2,其 `read()`/`write()` 在 `$C08x` 以外從不清除)。一併移除 `write()` 對每次寫入的無條件歸零(會破壞「兩次讀取間夾一個 STA」的解鎖序列)。
+* **驗證**：Rescue Raiders 開進 HIRES 遊戲(顯示 "64K");MASTER.DSK(`]` 提示)、The Goonies 回歸正常;`apple2-core` 49 項測試全過。
+* **工具強化 (`boot_smoke.rs`)**：新增 `BOOT_TRACE_AT`(指定起始秒)、`BOOT_TRACE_LO`/`BOOT_TRACE_HI`(PC 範圍過濾),便於擷取「失敗瞬間」的控制流而不被內層輪詢迴圈淹沒。

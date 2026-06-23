@@ -196,7 +196,6 @@ impl Apple2Memory {
 impl Memory for Apple2Memory {
     fn read(&mut self, addr: u16) -> u8 {
         let access_cycle = self.record_bus_access_cycle();
-        let mut clear_pre_write = true;
         let val = match addr {
             // Main RAM (48K)
             0x0000..=0xBFFF => self.ram[addr as usize],
@@ -223,11 +222,20 @@ impl Memory for Apple2Memory {
                         self.lc_read_enable = read_ram;
 
                         if is_write_en_switch {
+                            // Two consecutive reads of an odd $C08x address enable LC
+                            // write. The pre-write flip-flop is hardware that only
+                            // responds to $C08x accesses — intervening RAM/ROM reads
+                            // (including the CPU's own opcode/operand fetches between
+                            // the two `LDA $C083` instructions) must NOT clear it.
+                            // The previous `clear_pre_write` reset-on-every-read broke
+                            // this, so the LC write-enable never latched and software
+                            // RAM probes saw a 48K machine instead of 64K (Rescue
+                            // Raiders bailed to its title as a result). Matches the
+                            // PicoApple2 model, verified on real hardware.
                             if self.lc_pre_write_switch == canonical {
                                 self.lc_write_enable = true;
                             }
                             self.lc_pre_write_switch = canonical;
-                            clear_pre_write = false;
                         } else {
                             self.lc_write_enable = false;
                         }
@@ -312,16 +320,14 @@ impl Memory for Apple2Memory {
             }
         };
 
-        if clear_pre_write {
-            self.lc_pre_write_switch = 0;
-        }
-
         val
     }
 
     fn write(&mut self, addr: u16, data: u8) {
         let access_cycle = self.record_bus_access_cycle();
-        self.lc_pre_write_switch = 0;
+        // Note: a plain write does NOT clear the LC pre-write flip-flop. Only an
+        // even-$C08x access does (handled below). Resetting it on every write here
+        // would break unlock sequences that store to RAM between the two reads.
 
         match addr {
             // Main RAM (48K)

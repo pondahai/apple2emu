@@ -44,7 +44,12 @@ including bank switching and write-enable unlock behavior on `$C080-$C08F`.
 - Bank 1 / Bank 2 separation in `$D000-$DFFF`
 - Shared LC RAM window in `$E000-$FFFF`
 - Read-ROM / write-RAM split behavior
-- Echo-aware double-read unlock for write-enable switches
+- Double-read unlock for write-enable switches. **Fixed 2026-06-23:** the
+  pre-write flip-flop (`lc_pre_write_switch`) used to be cleared on every non-LC
+  read, so the CPU's own instruction fetches between the two `LDA $C083` reads
+  cancelled the unlock and write-enable never latched — software RAM probes saw
+  48K instead of 64K (Rescue Raiders bailed to its title). Now only `$C08x`
+  accesses touch the flip-flop, matching real hardware / PicoApple2.
 
 **Higher-Risk Remaining Gaps**:
 - The exact soft-switch decode matrix may still differ in edge cases from real

@@ -24,7 +24,40 @@ status, hot PCs and both text pages. Knobs (env vars):
 It also prints a prologue scan of the track the head ended on (D5AA96 address /
 D5AAAD data prologue counts).
 
-## Case: Rescue Raiders (`rescue_raiders.dsk.gz`) — OPEN
+## Case: Rescue Raiders (`rescue_raiders.dsk.gz`) — FIXED (2026-06-23)
+
+**Root cause (NOT a disk bug at all): the Language Card write-enable double-read
+was broken.** Enabling LC RAM writes requires two consecutive reads of an odd
+`$C08x` address (e.g. `LDA $C083` / `LDA $C083`). `memory.rs` reset the pre-write
+flip-flop (`lc_pre_write_switch`) on *every* non-LC read via a `clear_pre_write`
+flag — and the CPU's own opcode/operand fetches between the two `LDA $C083`
+instructions are non-LC reads, so the flip-flop was cleared before the second
+read and write-enable never latched. The game's power-on RAM probe therefore saw
+a 48K machine (no language card) instead of 64K, took its 48K load path, loaded
+the wrong tracks, and bailed back to the title. The fix: only `$C08x` accesses
+may touch the pre-write flip-flop (matches PicoApple2, whose `read()`/`write()`
+never clear it outside `$C08x`). See `git` history for `memory.rs`.
+
+**How it was found:** dumped main RAM ($0000–$BFFF) from apple2emu and from the
+PicoApple2 desktop core (`cargo test boot_smoke`, same `apple2_core` that runs on
+the Pico) at the same emulated second and diffed. The title text at `$07D0` read
+`48` on apple2emu vs `64` on PicoApple2 — the RAM-size readout — which pointed
+straight at the language card. The disk read model / nibblizer were verified
+byte-identical between the two and were never the problem here.
+
+**Verified:** Rescue Raiders now boots into the HIRES game (hot PCs in the
+`$08xx`–`$09xx` game loop, "64K" shown), matching PicoApple2. MASTER.DSK (DOS 3.3
+`]` prompt) and The Goonies still boot. All 49 `apple2-core` tests pass.
+
+**Repro (still useful as a regression check):**
+```
+BOOT_DSK=.../rescue_raiders.dsk.gz BOOT_SECS=30 BOOT_TYPE='\r' BOOT_TYPE_AT=13 \
+  cargo run --release --bin boot_smoke
+```
+
+---
+
+### Original investigation notes (kept for reference)
 
 **Symptom:** boots to a HIRES title screen that waits for a key; pressing ENTER
 loads for a while, then fails and restarts back to the title. Works on PicoApple2.

@@ -176,9 +176,18 @@ fn main() {
     let mut seek_seq: Vec<(u8, f64)> = Vec::new();
     let mut pc_hist: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
     let mut type_idx = 0usize;
-    // BOOT_TRACE=N: once typing starts, record up to N run-length-deduped PCs to
-    // reveal where control flow goes after a key is accepted.
+    // BOOT_TRACE=N: record up to N run-length-deduped PCs to reveal where control
+    // flow goes. By default it arms at BOOT_TYPE_AT, but BOOT_TRACE_AT=<sec> can
+    // delay it (e.g. to catch a failure decision that happens seconds after a key
+    // press). BOOT_TRACE_LO/BOOT_TRACE_HI (hex) restrict recording to a PC window
+    // so tight inner read/wait loops don't flood the buffer.
     let trace_cap = env_u64("BOOT_TRACE", 0) as usize;
+    let trace_at_cycle = match env::var("BOOT_TRACE_AT").ok().and_then(|s| s.parse::<f64>().ok()) {
+        Some(sec) => (sec * CPU_HZ) as u64,
+        None => type_at_cycle,
+    };
+    let trace_lo = env::var("BOOT_TRACE_LO").ok().and_then(|s| u16::from_str_radix(s.trim(), 16).ok()).unwrap_or(0x0000);
+    let trace_hi = env::var("BOOT_TRACE_HI").ok().and_then(|s| u16::from_str_radix(s.trim(), 16).ok()).unwrap_or(0xFFFF);
     let mut trace: Vec<u16> = Vec::new();
     // BOOT_WATCH_PC=HEX: capture the A register every time this PC executes
     // (after BOOT_TYPE_AT), revealing the byte stream a read loop consumes.
@@ -190,7 +199,9 @@ fn main() {
         let pc_before = machine.cpu.pc;
         cycles += machine.step() as u64;
 
-        if trace_cap > 0 && cycles >= type_at_cycle && trace.len() < trace_cap {
+        if trace_cap > 0 && cycles >= trace_at_cycle && trace.len() < trace_cap
+            && (trace_lo..=trace_hi).contains(&pc_before)
+        {
             if trace.last() != Some(&pc_before) {
                 trace.push(pc_before);
             }
