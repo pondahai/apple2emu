@@ -38,8 +38,9 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
         let mut track_out = TrackData::new();
         let track_offset = track_num * 16 * 256;
 
-        // Pre-gap: 64 self-sync bytes
-        for _ in 0..64 {
+        // Lead-in: 128 self-sync bytes (matches the PicoApple2 layout, which all
+        // tested game loaders read successfully).
+        for _ in 0..128 {
             track_out.push(0xFF);
         }
 
@@ -77,8 +78,13 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
             track_out.push(0xAA);
             track_out.push(0xEB);
 
-            // Inter-field gap: 6 self-sync bytes
-            for _ in 0..6 {
+            // Inter-field gap: 12 self-sync bytes. This is the processing window
+            // a loader gets between the address field and the data prologue. Too
+            // short a gap (the previous value was 6) makes custom loaders that do
+            // extra per-sector work miss the data field — they read the address
+            // field fine but the data prologue passes before they start reading
+            // it (observed with Rescue Raiders). 12 matches PicoApple2.
+            for _ in 0..12 {
                 track_out.push(0xFF);
             }
 
@@ -94,7 +100,8 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
             //   bits [3:2] = sector_data[k + 86]  & 0x03  (group 1, offset 86)
             //   bits [5:4] = sector_data[k + 172] & 0x03  (group 2, offset 172, k<84 only)
             //
-            // No bit-swap. The secondary buffer is emitted REVERSED (snib[85]..snib[0]).
+            // Each 2-bit group is bit-swapped (swap2) and the buffer is emitted
+            // forward (snib[0]..snib[85]) — the standard DOS 3.3 layout.
             let swap2 = |b: u8| -> u8 { ((b & 0x01) << 1) | ((b & 0x02) >> 1) };
 
             let mut snib = [0u8; 86];
@@ -130,10 +137,16 @@ pub fn nibblize_dsk(disk_data: &[u8]) -> alloc::vec::Vec<TrackData> {
             track_out.push(0xAA);
             track_out.push(0xEB);
 
-            // Inter-sector gap: 27 self-sync bytes
-            for _ in 0..27 {
+            // Inter-sector gap: 20 self-sync bytes
+            for _ in 0..20 {
                 track_out.push(0xFF);
             }
+        }
+
+        // Pad the remainder of the physical track with self-sync so every track
+        // is the full 6656 bytes (matches the PicoApple2 layout).
+        while track_out.length < 6656 {
+            track_out.push(0xFF);
         }
         track_out.read_length = track_out.length;
         tracks.push(track_out);

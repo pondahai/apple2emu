@@ -180,6 +180,10 @@ fn main() {
     // reveal where control flow goes after a key is accepted.
     let trace_cap = env_u64("BOOT_TRACE", 0) as usize;
     let mut trace: Vec<u16> = Vec::new();
+    // BOOT_WATCH_PC=HEX: capture the A register every time this PC executes
+    // (after BOOT_TYPE_AT), revealing the byte stream a read loop consumes.
+    let watch_pc = env::var("BOOT_WATCH_PC").ok().and_then(|s| u16::from_str_radix(s.trim(), 16).ok());
+    let mut watch_samples: Vec<u8> = Vec::new();
     let wall_start = std::time::Instant::now();
 
     while cycles < target {
@@ -189,6 +193,12 @@ fn main() {
         if trace_cap > 0 && cycles >= type_at_cycle && trace.len() < trace_cap {
             if trace.last() != Some(&pc_before) {
                 trace.push(pc_before);
+            }
+        }
+
+        if let Some(wpc) = watch_pc {
+            if pc_before == wpc && cycles >= type_at_cycle && watch_samples.len() < 4096 {
+                watch_samples.push(machine.cpu.a);
             }
         }
 
@@ -254,6 +264,26 @@ fn main() {
         emulated_mhz / 1.0205
     );
 
+    // Scan the track the head ended on for standard address/data prologues.
+    {
+        let t = machine.mem.disk2.current_track;
+        if let Some(track) = machine.mem.disk2.tracks.get(t) {
+            let len = track.length;
+            let b = &track.raw_bytes;
+            let (mut addr_pro, mut data_pro) = (0u32, 0u32);
+            if len >= 3 {
+                for i in 0..len {
+                    let x = b[i];
+                    let y = b[(i + 1) % len];
+                    let z = b[(i + 2) % len];
+                    if x == 0xD5 && y == 0xAA && z == 0x96 { addr_pro += 1; }
+                    if x == 0xD5 && y == 0xAA && z == 0xAD { data_pro += 1; }
+                }
+            }
+            println!("track {t} (len {len}): D5AA96 addr-prologues={addr_pro}  D5AAAD data-prologues={data_pro}");
+        }
+    }
+
     let mut hot: Vec<(u16, u32)> = pc_hist.into_iter().collect();
     hot.sort_by(|a, b| b.1.cmp(&a.1));
     let hot_str: Vec<String> = hot.iter().take(8).map(|(pc, n)| format!("{pc:04X}x{n}")).collect();
@@ -281,6 +311,19 @@ fn main() {
     if !trace.is_empty() {
         let t: Vec<String> = trace.iter().map(|pc| format!("{pc:04X}")).collect();
         println!("\nPC trace after key ({}): {}", trace.len(), t.join(" "));
+    }
+
+    if let Some(wpc) = watch_pc {
+        let mut hist = [0u32; 256];
+        for &b in &watch_samples {
+            hist[b as usize] += 1;
+        }
+        let mut top: Vec<(usize, u32)> = hist.iter().enumerate().filter(|&(_, &n)| n > 0).map(|(b, &n)| (b, n)).collect();
+        top.sort_by(|a, b| b.1.cmp(&a.1));
+        let top_str: Vec<String> = top.iter().take(12).map(|(b, n)| format!("{b:02X}x{n}")).collect();
+        let first: Vec<String> = watch_samples.iter().take(48).map(|b| format!("{b:02X}")).collect();
+        println!("\nA at {wpc:04X} ({} samples)\n  byte histogram: {}\n  first 48: {}",
+            watch_samples.len(), top_str.join(" "), first.join(" "));
     }
 
     println!();
