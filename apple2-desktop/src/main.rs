@@ -162,8 +162,13 @@ fn save_disk_image(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn rebuild_sink(audio_handle: Option<&OutputStreamHandle>) -> Option<Sink> {
-    audio_handle.and_then(|handle| Sink::try_new(handle).ok())
+fn rebuild_sink(audio_handle: Option<&OutputStreamHandle>, volume: f32) -> Option<Sink> {
+    audio_handle.and_then(|handle| {
+        Sink::try_new(handle).ok().map(|s| {
+            s.set_volume(volume);
+            s
+        })
+    })
 }
 
 fn joystick_axis(negative_pressed: bool, positive_pressed: bool) -> u8 {
@@ -205,8 +210,13 @@ mod tests {
     }
 }
 
-fn update_window_title(window: &mut Window, speed_multiplier: f32, auto_disk_turbo_active: bool) {
-    let title = if auto_disk_turbo_active || speed_multiplier == 0.0 {
+fn update_window_title(
+    window: &mut Window,
+    speed_multiplier: f32,
+    auto_disk_turbo_active: bool,
+    volume: f32,
+) {
+    let mut title = if auto_disk_turbo_active || speed_multiplier == 0.0 {
         "Apple II Emulator (Rust no_std core) [TURBO FULL UNTHROTTLED]".to_string()
     } else if speed_multiplier > 1.0 {
         format!(
@@ -216,6 +226,11 @@ fn update_window_title(window: &mut Window, speed_multiplier: f32, auto_disk_tur
     } else {
         "Apple II Emulator (Rust no_std core)".to_string()
     };
+    if volume <= 0.0 {
+        title.push_str(" [MUTED]");
+    } else if (volume - 1.0).abs() > f32::EPSILON {
+        title.push_str(&format!(" [VOL {:.0}%]", volume * 100.0));
+    }
     window.set_title(&title);
 }
 
@@ -227,6 +242,7 @@ fn main() {
     println!("Starting Apple II Emulator targeting Windows (minifb) and core no_std...");
 
     let mut config = EmulatorConfig::load();
+    config.volume = config.volume.clamp(0.0, 1.0);
 
     // Create the Windows window
     let mut window = Window::new(
@@ -250,7 +266,7 @@ fn main() {
     if let Ok((s, sh)) = audio_device {
         _stream = Some(s);
         audio_handle = Some(sh.clone());
-        sink = rebuild_sink(audio_handle.as_ref());
+        sink = rebuild_sink(audio_handle.as_ref(), config.volume);
     } else {
         println!("Warning: Could not initialize audio output.");
     }
@@ -344,12 +360,15 @@ fn main() {
     println!("CPU Reset Vector: {:04X} (Normal boot)", machine.cpu.pc);
 
     let mut last_cycle = Instant::now();
+    // Paste queue: clipboard text is fed to the latch one char at a time,
+    // paced by the emulated program consuming the keyboard strobe.
     let mut key_queue: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
-    let mut last_keys: Vec<Key> = Vec::new();
 
     let mut last_f2_down = false;
     let mut last_f3_down = false;
     let mut last_f4_down = false;
+    let mut last_f6_down = false;
+    let mut last_f7_down = false;
     let mut last_right_mouse_down = false;
     let mut clipboard = arboard::Clipboard::new().ok();
     
@@ -359,21 +378,14 @@ fn main() {
     let mut audio_mixer = AudioMixerState::new(machine.mem.speaker);
     let sample_rate: u32 = 44_100;
     let cycles_per_sample = 1_023_000.0_f64 / sample_rate as f64;
-    update_window_title(&mut window, speed_multiplier, false);
+    update_window_title(&mut window, speed_multiplier, false, config.volume);
     let mut current_target_fps: usize = 60;
     let mut last_title_speed_multiplier = speed_multiplier;
     let mut last_title_auto_disk_turbo = false;
 
     while window.is_open() && !window.is_key_down(Key::F10) {
-        // Handle Input
-        let current_keys = window.get_keys();
-        let mut keys = Vec::new();
-        for &k in &current_keys {
-            if !last_keys.contains(&k) {
-                keys.push(k);
-            }
-        }
-        last_keys = current_keys;
+        // Handle Input (with OS auto-repeat, like a real keyboard)
+        let keys = window.get_keys_pressed(minifb::KeyRepeat::Yes);
         let ctrl_down = window.is_key_down(Key::LeftCtrl) || window.is_key_down(Key::RightCtrl);
         let shift_down = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
         let joystick_x = joystick_axis(
@@ -443,7 +455,9 @@ fn main() {
                 _ => 0,
             };
             if ascii != 0 {
-                key_queue.push_back(ascii);
+                // Live typing writes the latch directly, like real hardware:
+                // a new keypress overwrites the previous one even if unread.
+                machine.mem.keyboard_latch = 0x80 | ascii;
             }
         }
 
@@ -467,7 +481,7 @@ fn main() {
                 machine.reset();
                 key_queue.clear();
             }
-            sink = rebuild_sink(audio_handle.as_ref());
+            sink = rebuild_sink(audio_handle.as_ref(), config.volume);
             audio_mixer.reset_at(machine.total_cycles as f64, cycles_per_sample, machine.mem.speaker);
             dc_filter_x1 = 0.0; dc_filter_y1 = 0.0;
         }
@@ -487,7 +501,7 @@ fn main() {
                         }
                         cached_disk_image = Some(disk_image.clone());
                         machine.mem.disk2.load_disk(&disk_image);
-                        sink = rebuild_sink(audio_handle.as_ref());
+                        sink = rebuild_sink(audio_handle.as_ref(), config.volume);
                         audio_mixer.reset_at(machine.total_cycles as f64, cycles_per_sample, machine.mem.speaker);
                         dc_filter_x1 = 0.0; dc_filter_y1 = 0.0;
                         config.last_disk_path = Some(path);
@@ -504,6 +518,27 @@ fn main() {
             speed_multiplier = speed_steps[speed_index];
         }
         last_f4_down = f4_down;
+
+        // F6 / F7: volume down / up in 10% steps.
+        let f6_down = window.is_key_down(Key::F6);
+        let f7_down = window.is_key_down(Key::F7);
+        let volume_step = if f6_down && !last_f6_down {
+            -0.1
+        } else if f7_down && !last_f7_down {
+            0.1
+        } else {
+            0.0
+        };
+        if volume_step != 0.0 {
+            config.volume = ((config.volume + volume_step) * 10.0).round().clamp(0.0, 10.0) / 10.0;
+            if let Some(s) = &sink {
+                s.set_volume(config.volume);
+            }
+            config.save();
+            update_window_title(&mut window, speed_multiplier, machine.mem.disk2.motor_on, config.volume);
+        }
+        last_f6_down = f6_down;
+        last_f7_down = f7_down;
 
         let right_mouse_down = window.get_mouse_down(minifb::MouseButton::Right);
         if right_mouse_down && !last_right_mouse_down {
@@ -553,7 +588,7 @@ fn main() {
         }
 
         if (last_title_speed_multiplier - speed_multiplier).abs() > 0.001 || last_title_auto_disk_turbo != auto_disk_turbo_active {
-            update_window_title(&mut window, speed_multiplier, auto_disk_turbo_active);
+            update_window_title(&mut window, speed_multiplier, auto_disk_turbo_active, config.volume);
             last_title_speed_multiplier = speed_multiplier;
             last_title_auto_disk_turbo = auto_disk_turbo_active;
         }

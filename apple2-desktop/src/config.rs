@@ -2,9 +2,24 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize, Default, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct EmulatorConfig {
     pub last_disk_path: Option<PathBuf>,
+    #[serde(default = "default_volume")]
+    pub volume: f32,
+}
+
+fn default_volume() -> f32 {
+    1.0
+}
+
+impl Default for EmulatorConfig {
+    fn default() -> Self {
+        Self {
+            last_disk_path: None,
+            volume: default_volume(),
+        }
+    }
 }
 
 impl EmulatorConfig {
