@@ -298,6 +298,9 @@ fn main() {
     let mut cached_main_rom = Vec::new();
     let mut cached_disk_rom = Vec::new();
     let mut cached_disk_image: Option<Vec<u8>> = None;
+    // Human-readable list of non-fatal missing/invalid ROM files, shown in
+    // one warning dialog after the load phase.
+    let mut rom_warnings: Vec<String> = Vec::new();
 
     // Load Main ROM
     let main_rom_path = roms_dir.join("APPLE2PLUS.ROM");
@@ -308,9 +311,22 @@ fn main() {
                 let start = rom_file.len() - 12288;
                 cached_main_rom = rom_file[start..].to_vec();
                 machine.load_rom(&cached_main_rom);
+            } else {
+                println!("ERROR: {} is too small ({} bytes, need 12288)", main_rom_path.display(), rom_file.len());
             }
         }
         Err(e) => println!("ERROR: Could not open {}: {}", main_rom_path.display(), e),
+    }
+    if cached_main_rom.is_empty() {
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("Missing ROM file")
+            .set_description(format!(
+                "Could not load the Apple II+ system ROM:\n\n{}\n\nPlace APPLE2PLUS.ROM (12KB, $D000-$FFFF) in the roms folder and restart.\nSee roms/PUT_ROMS_HERE.txt for the full file list.",
+                main_rom_path.display()
+            ))
+            .show();
+        return;
     }
 
     // Load Disk II Boot ROM
@@ -321,9 +337,14 @@ fn main() {
                 cached_disk_rom = disk_rom.clone();
                 machine.mem.disk2.load_boot_rom(&cached_disk_rom);
                 println!("Loaded Disk II Boot ROM (Slot 6): 256 bytes");
+            } else {
+                rom_warnings.push(format!("DISK2.ROM has wrong size ({} bytes, need 256) - floppy disks cannot boot", disk_rom.len()));
             }
         }
-        Err(e) => println!("ERROR: Could not open {}: {}", disk_rom_path.display(), e),
+        Err(e) => {
+            println!("ERROR: Could not open {}: {}", disk_rom_path.display(), e);
+            rom_warnings.push("DISK2.ROM not found - floppy disks cannot boot".to_string());
+        }
     }
 
     // Load Disk Image
@@ -341,19 +362,42 @@ fn main() {
                 machine.mem.disk2.load_disk(&disk_image);
                 println!("Loaded floppy image from {}: 140KB", dsk_path.display());
             }
-            Err(e) => println!("WARNING: {}", e),
+            Err(e) => {
+                println!("WARNING: {}", e);
+                rom_warnings.push(format!("Disk image could not be decoded ({}) - press F3 to load another disk", e));
+            }
         },
-        Err(e) => println!("ERROR: Could not open {}: {}", dsk_path.display(), e),
+        Err(e) => {
+            println!("ERROR: Could not open {}: {}", dsk_path.display(), e);
+            rom_warnings.push("No boot disk found (MASTER.DSK) - press F3 to load a disk".to_string());
+        }
     }
 
     // Load Character ROM
     let mut char_rom = [0x55u8; 2048]; // Checkerboard fallback
     let char_rom_path = roms_dir.join("Apple II plus Video ROM - 341-0036 - Rev. 7.bin");
+    let mut char_rom_loaded = false;
     if let Ok(char_file) = std::fs::read(&char_rom_path) {
         if char_file.len() == 2048 {
             char_rom.copy_from_slice(&char_file);
+            char_rom_loaded = true;
             println!("Loaded Character ROM (341-0036): 2048 bytes");
         }
+    }
+    if !char_rom_loaded {
+        rom_warnings.push("Character ROM (Apple II plus Video ROM - 341-0036 - Rev. 7.bin) not found - text will render as a checkerboard".to_string());
+    }
+
+    if !rom_warnings.is_empty() {
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("Missing ROM files")
+            .set_description(format!(
+                "Some files are missing from the roms folder:\n\n- {}\n\nroms folder: {}\nSee roms/PUT_ROMS_HERE.txt for details. The emulator will start anyway.",
+                rom_warnings.join("\n- "),
+                roms_dir.display()
+            ))
+            .show();
     }
 
     machine.reset();
