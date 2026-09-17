@@ -178,8 +178,19 @@ impl Apple2Memory {
         }
     }
 
+    /// Paddle pulse width in CPU cycles.
+    ///
+    /// The mid/low range stays linear (`8 + v*11`), so PREAD reads back the same
+    /// value as before. The full-deflection end gets an extra slope: a real Apple II
+    /// full-scale pulse runs ~3300+ cycles (the saturation region beyond PREAD's
+    /// range -- PREAD still returns 255 there), while pure linear tops out at 2813.
+    /// Coarse 54-cycle-per-iteration joystick loops (CLR, Championship Lode Runner;
+    /// threshold 55 iterations) only counted 52 with the linear curve, so right/down
+    /// never registered. Only `v > 192` is affected; centered (128) is byte-for-byte
+    /// unchanged, so proportional paddle games see no difference.
     fn paddle_timeout_cycles(value: u8) -> u64 {
-        8 + (value as u64 * 11)
+        let v = value as u64;
+        8 + v * 11 + v.saturating_sub(192) * 6
     }
 
     fn read_paddle(&self, index: usize, access_cycle: Option<u64>) -> u8 {
@@ -320,9 +331,14 @@ impl Memory for Apple2Memory {
                     0xC000..=0xC00F => self.keyboard_latch,
                     // Keyboard Clear Strobe (mirrored $C010-$C01F)
                     0xC010..=0xC01F => {
-                        let val = self.keyboard_latch;
+                        // Reading only clears the strobe; the value returned is the
+                        // floating bus, not the latch. On a II/II+ there is no data
+                        // driver at $C010 (AKD is a //e feature), so the CPU sees
+                        // whatever byte the video scanner left on the bus -- same as
+                        // $C030 / $C050-$C057 / $C080. Programs using $C010 as a
+                        // randomness or timing source got a constant before this.
                         self.keyboard_latch &= 0x7F; // Clear highest bit
-                        val // Return the value BEFORE clearing (some routines check it)
+                        self.floating_bus(access_cycle)
                     }
                     // Language Card Soft Switches
                     0xC080..=0xC08F => {

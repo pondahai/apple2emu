@@ -96,7 +96,9 @@ mod tests {
         let early = mem.read(0xC064);
         mem.end_cpu_step();
 
-        mem.begin_cpu_step(3_000);
+        // Full deflection now runs into the saturation region (~3191 cycles from
+        // the strobe), so the pulse has to be sampled past that to read low.
+        mem.begin_cpu_step(4_000);
         let late = mem.read(0xC064);
         mem.end_cpu_step();
 
@@ -172,5 +174,86 @@ mod tests {
 
         assert_eq!(rom_val, 0xAA);
         assert_eq!(mem.lc_ram[0x1000], 0x44);
+    }
+
+    #[test]
+    fn kbdstrobe_read_clears_strobe_and_returns_floating_bus() {
+        let mut mem = Apple2Memory::new();
+        // Give the scanner something to pick up: a per-address pattern so the
+        // floating bus value actually changes as the beam moves.
+        for (i, b) in mem.ram.iter_mut().enumerate() {
+            *b = (i & 0xFF) as u8;
+        }
+        mem.keyboard_latch = 0xC1; // 'A' with strobe set
+
+        // $C000 still reports the latch verbatim.
+        mem.begin_cpu_step(0);
+        let data = mem.read(0xC000);
+        mem.end_cpu_step();
+        assert_eq!(data, 0xC1);
+
+        // $C010 clears the strobe...
+        mem.begin_cpu_step(0);
+        let first = mem.read(0xC010);
+        mem.end_cpu_step();
+        assert_eq!(mem.keyboard_latch, 0x41, "strobe bit must be cleared");
+
+        // ...and what it returns tracks the video scanner, not the latch.
+        mem.keyboard_latch = 0xC1;
+        mem.begin_cpu_step(12_345);
+        let second = mem.read(0xC010);
+        mem.end_cpu_step();
+
+        assert_ne!(
+            first, second,
+            "$C010 must float with the scanner, not return a constant"
+        );
+    }
+
+    #[test]
+    fn full_deflection_paddle_pulse_reaches_saturation_region() {
+        let mut mem = Apple2Memory::new();
+        mem.paddles[0] = 255;
+
+        // Latch the paddles at cycle 0.
+        mem.begin_cpu_step(0);
+        let _ = mem.read(0xC070);
+        mem.end_cpu_step();
+
+        // A coarse 54-cycle read loop needs 55 iterations (~2970 cycles) to call
+        // it full deflection. The old linear curve expired at 2813 and the pulse
+        // read low here, so right/down never registered.
+        mem.begin_cpu_step(2_970);
+        let still_high = mem.read(0xC064);
+        mem.end_cpu_step();
+        assert_eq!(still_high, 0x80, "full deflection must survive 55 iterations");
+
+        // It must still end, well before the ~3300-cycle real-hardware ceiling
+        // turns into a hang.
+        mem.begin_cpu_step(4_000);
+        let expired = mem.read(0xC064);
+        mem.end_cpu_step();
+        assert_eq!(expired, 0x00);
+    }
+
+    #[test]
+    fn centered_paddle_pulse_is_unchanged() {
+        let mut mem = Apple2Memory::new();
+        mem.paddles[0] = 128; // centered -- must stay byte-for-byte as before
+
+        mem.begin_cpu_step(0);
+        let _ = mem.read(0xC070);
+        mem.end_cpu_step();
+
+        // 8 + 128*11 = 1416
+        mem.begin_cpu_step(1_415);
+        let high = mem.read(0xC064);
+        mem.end_cpu_step();
+        assert_eq!(high, 0x80);
+
+        mem.begin_cpu_step(1_416);
+        let low = mem.read(0xC064);
+        mem.end_cpu_step();
+        assert_eq!(low, 0x00);
     }
 }
