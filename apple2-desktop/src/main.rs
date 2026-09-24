@@ -694,10 +694,26 @@ fn main() {
         // backlog passes a small slack threshold, drop it entirely by
         // rebuilding the sink and only append this frame's fresh samples -
         // a brief audible skip during a burst, but audio is never stale.
+        //
+        // At a steady manual speed step (1.2x/1.5x/2x/5x) cycles - and
+        // therefore audio samples - are generated faster than real time on
+        // purpose and *continuously*, not as an occasional burst. Playing
+        // that queue back at normal speed would mean it structurally never
+        // drains, hitting the drop-threshold over and over and clicking
+        // constantly. So play it back pitch-shifted at that same multiplier
+        // instead, keeping generation and playback in lockstep; the drop
+        // fallback below then only has to catch genuine spikes (disk-motor
+        // auto-turbo, a stalled host frame), not steady-state turbo.
+        if let Some(s) = &sink {
+            s.set_speed(if is_full_speed { 1.0 } else { effective_speed_multiplier });
+        }
         const MAX_QUEUED_CHUNKS: usize = 2;
         if let Some(s) = &sink {
             if s.len() > MAX_QUEUED_CHUNKS {
                 sink = rebuild_sink(audio_handle.as_ref(), config.volume);
+                if let Some(s) = &sink {
+                    s.set_speed(if is_full_speed { 1.0 } else { effective_speed_multiplier });
+                }
                 audio_mixer.reset_at(machine.total_cycles as f64, cycles_per_sample, machine.mem.speaker);
                 dc_filter_x1 = 0.0; dc_filter_y1 = 0.0;
             }
