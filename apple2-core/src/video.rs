@@ -36,12 +36,35 @@ const ROW_ADDRESSES: [u16; 24] = [
 
 pub struct Video {
     pub frame_buffer: [u32; SCREEN_WIDTH * SCREEN_HEIGHT],
+    /// Green-screen monochrome mode: when true, every non-black pixel is
+    /// remapped to a single green tone after rendering, like a real Apple II
+    /// hooked up to a monochrome composite monitor.
+    pub mono: bool,
 }
 
 impl Video {
     pub fn new() -> Self {
         Self {
             frame_buffer: [0; SCREEN_WIDTH * SCREEN_HEIGHT], // XRGB 32-bit
+            mono: false,
+        }
+    }
+
+    pub fn toggle_mono(&mut self) {
+        self.mono = !self.mono;
+    }
+
+    /// Collapse the just-rendered frame to green-on-black. Called at the end
+    /// of each render_* method so it applies uniformly to text/lores/hires.
+    fn apply_mono_filter(&mut self) {
+        if !self.mono {
+            return;
+        }
+        const GREEN: u32 = 0xFF_33_FF_33;
+        for pixel in self.frame_buffer.iter_mut() {
+            if (*pixel & 0x00FF_FFFF) != 0 {
+                *pixel = GREEN;
+            }
         }
     }
 
@@ -122,6 +145,7 @@ impl Video {
                 }
             }
         }
+        self.apply_mono_filter();
     }
 
     /// Convert Apple II 4-bit Lo-Res color index to 32-bit ARGB
@@ -219,6 +243,7 @@ impl Video {
                 }
             }
         }
+        self.apply_mono_filter();
     }
 
     /// Calculate the memory address of the first byte of a given Hi-Res row
@@ -340,6 +365,7 @@ impl Video {
                 }
             }
         }
+        self.apply_mono_filter();
     }
 }
 

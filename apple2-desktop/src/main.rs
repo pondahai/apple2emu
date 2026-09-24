@@ -408,11 +408,13 @@ fn main() {
     // paced by the emulated program consuming the keyboard strobe.
     let mut key_queue: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
 
+    let mut last_f1_down = false;
     let mut last_f2_down = false;
     let mut last_f3_down = false;
-    let mut last_f4_down = false;
-    let mut last_f6_down = false;
+    let mut last_f5_down = false;
     let mut last_f7_down = false;
+    let mut last_f8_down = false;
+    let mut last_f9_down = false;
     let mut last_right_mouse_down = false;
     let mut clipboard = arboard::Clipboard::new().ok();
     
@@ -505,6 +507,12 @@ fn main() {
             }
         }
 
+        if window.is_key_down(Key::F1) && !last_f1_down {
+            println!(">>> SYSTEM RESET (Ctrl-Reset / Warm Boot)");
+            machine.reset();
+        }
+        last_f1_down = window.is_key_down(Key::F1);
+
         if window.is_key_down(Key::F2) && !last_f2_down {
             if ctrl_down {
                 println!(">>> SYSTEM RESET (Warm Boot)");
@@ -556,19 +564,26 @@ fn main() {
         }
         last_f3_down = f3_down;
 
-        let f4_down = window.is_key_down(Key::F4);
-        if f4_down && !last_f4_down {
+        let f5_down = window.is_key_down(Key::F5);
+        if f5_down && !last_f5_down {
             speed_index = (speed_index + 1) % speed_steps.len();
             speed_multiplier = speed_steps[speed_index];
         }
-        last_f4_down = f4_down;
+        last_f5_down = f5_down;
 
-        // F6 / F7: volume down / up in 10% steps.
-        let f6_down = window.is_key_down(Key::F6);
         let f7_down = window.is_key_down(Key::F7);
-        let volume_step = if f6_down && !last_f6_down {
+        if f7_down && !last_f7_down {
+            video.toggle_mono();
+            println!(">>> Screen mode: {}", if video.mono { "Green (mono)" } else { "Color" });
+        }
+        last_f7_down = f7_down;
+
+        // F8 / F9: volume down / up in 10% steps.
+        let f8_down = window.is_key_down(Key::F8);
+        let f9_down = window.is_key_down(Key::F9);
+        let volume_step = if f8_down && !last_f8_down {
             -0.1
-        } else if f7_down && !last_f7_down {
+        } else if f9_down && !last_f9_down {
             0.1
         } else {
             0.0
@@ -581,8 +596,8 @@ fn main() {
             config.save();
             update_window_title(&mut window, speed_multiplier, machine.mem.disk2.motor_on, config.volume);
         }
-        last_f6_down = f6_down;
-        last_f7_down = f7_down;
+        last_f8_down = f8_down;
+        last_f9_down = f9_down;
 
         let right_mouse_down = window.get_mouse_down(minifb::MouseButton::Right);
         if right_mouse_down && !last_right_mouse_down {
