@@ -236,6 +236,11 @@ fn update_window_title(
 
 fn main() {
     const BASE_FRAME_CYCLES: u32 = 17_050;
+    const CPU_HZ: f64 = 1_023_000.0;
+    // Cap how much wall-clock time a single iteration can "owe" cycles for,
+    // so a debugger pause, window drag, or other stall doesn't cause a huge
+    // catch-up burst of emulated time (and audio) all at once afterwards.
+    const MAX_OWED_SECS: f64 = 0.1;
     let speed_steps: [f32; 6] = [1.0, 1.2, 1.5, 2.0, 5.0, 0.0];
     let mut speed_index: usize = 0;
 
@@ -652,10 +657,24 @@ fn main() {
             last_title_auto_disk_turbo = auto_disk_turbo_active;
         }
 
-        // For unthrottled mode, we still run one "normal" frame's worth of cycles per loop 
-        // to keep UI and audio processing smooth, but with window FPS limit removed.
-        let run_multiplier = if is_full_speed { 1.0 } else { effective_speed_multiplier };
-        let target_cycles = (BASE_FRAME_CYCLES as f32 * run_multiplier) as u32;
+        // Wall-clock-driven pacing: run exactly as many emulated cycles as
+        // real time has actually elapsed for (scaled by the speed multiplier),
+        // instead of assuming a fixed cycle count per host frame. That fixed
+        // assumption only held as long as minifb's FPS limiter was hitting
+        // its target exactly - any drift, or auto disk-turbo skipping the
+        // limiter (desired_fps=0) entirely, meant cycles (and therefore
+        // audio) could race far ahead of real time.
+        // Full/unthrottled speed is deliberately exempt: there "as fast as
+        // the host can go" is the point, so it still just runs one base
+        // frame's worth of cycles per loop iteration with no throttling.
+        let now = Instant::now();
+        let owed_secs = now.duration_since(last_cycle).as_secs_f64().min(MAX_OWED_SECS);
+        last_cycle = now;
+        let target_cycles = if is_full_speed {
+            BASE_FRAME_CYCLES
+        } else {
+            (CPU_HZ * effective_speed_multiplier as f64 * owed_secs) as u32
+        };
         while frame_cycles < target_cycles {
             let cycles = machine.step();
             frame_cycles += cycles;
@@ -667,11 +686,25 @@ fn main() {
             audio_mixer.mix_until(machine.total_cycles as f64, cycles_per_sample, &mut dc_filter_x1, &mut dc_filter_y1, &mut audio_samples);
         }
 
+        // Audio must represent "now", not a queue to work through. If the
+        // sink has more than a couple of chunks backlogged (turbo burst,
+        // disk-motor auto-turbo, a slow host frame, whatever the cause),
+        // catching up later or playing it back pitch-shifted still means
+        // what you hear lags behind what's on screen. Instead, once the
+        // backlog passes a small slack threshold, drop it entirely by
+        // rebuilding the sink and only append this frame's fresh samples -
+        // a brief audible skip during a burst, but audio is never stale.
+        const MAX_QUEUED_CHUNKS: usize = 2;
+        if let Some(s) = &sink {
+            if s.len() > MAX_QUEUED_CHUNKS {
+                sink = rebuild_sink(audio_handle.as_ref(), config.volume);
+                audio_mixer.reset_at(machine.total_cycles as f64, cycles_per_sample, machine.mem.speaker);
+                dc_filter_x1 = 0.0; dc_filter_y1 = 0.0;
+            }
+        }
         if let Some(s) = &sink {
             if !audio_samples.is_empty() {
-                if s.len() <= 15 {
-                    s.append(rodio::buffer::SamplesBuffer::new(1, sample_rate, audio_samples));
-                }
+                s.append(rodio::buffer::SamplesBuffer::new(1, sample_rate, audio_samples));
             }
         }
 
