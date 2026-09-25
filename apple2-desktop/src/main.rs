@@ -2,10 +2,92 @@ use apple2_core::machine::Apple2Machine;
 use apple2_core::memory::Memory;
 use apple2_core::video::{SCREEN_HEIGHT, SCREEN_WIDTH, Video};
 use flate2::read::GzDecoder;
-use minifb::{Key, Window, WindowOptions};
+use minifb::{InputCallback, Key, Window, WindowOptions};
 use rodio::{OutputStream, OutputStreamHandle, Sink};
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::io::Read;
+use std::rc::Rc;
 use std::time::Instant;
+
+/// Raw key-down edges as they actually happen, independent of how often the
+/// main loop gets around to polling. minifb's `is_key_down`/`get_keys_pressed`
+/// only reflect a snapshot at poll time, so a key pressed and released
+/// entirely between two polls (easy to hit once the loop is wall-clock/turbo
+/// paced instead of a fixed 60Hz) would otherwise be silently missed.
+///
+/// Records both down AND up transitions: Windows itself resends WM_KEYDOWN
+/// repeatedly while a key is held (its own OS-level auto-repeat), with no
+/// WM_KEYUP in between - so an up event is the only reliable signal that
+/// distinguishes "still holding the same key" (should be rate-limited) from
+/// "a genuine new press" (should register immediately), including a real
+/// quick double-tap of the same key.
+struct KeyEventRecorder {
+    events: Rc<RefCell<VecDeque<(Key, bool)>>>,
+}
+
+impl InputCallback for KeyEventRecorder {
+    fn add_char(&mut self, _uni_char: u32) {}
+
+    fn set_key_state(&mut self, key: Key, state: bool) {
+        self.events.borrow_mut().push_back((key, state));
+    }
+}
+
+/// Shared ASCII mapping used both for the guaranteed-delivery key-down event
+/// queue and for re-checking whether a held key is still down.
+fn key_to_ascii(key: Key, ctrl_down: bool, shift_down: bool) -> u8 {
+    match key {
+        Key::A => if ctrl_down { 0x01 } else { b'A' },
+        Key::B => if ctrl_down { 0x02 } else { b'B' },
+        Key::C => if ctrl_down { 0x03 } else { b'C' },
+        Key::D => if ctrl_down { 0x04 } else { b'D' },
+        Key::E => if ctrl_down { 0x05 } else { b'E' },
+        Key::F => if ctrl_down { 0x06 } else { b'F' },
+        Key::G => if ctrl_down { 0x07 } else { b'G' },
+        Key::H => if ctrl_down { 0x08 } else { b'H' },
+        Key::I => if ctrl_down { 0x09 } else { b'I' },
+        Key::J => if ctrl_down { 0x0A } else { b'J' },
+        Key::K => if ctrl_down { 0x0B } else { b'K' },
+        Key::L => if ctrl_down { 0x0C } else { b'L' },
+        Key::M => if ctrl_down { 0x0D } else { b'M' },
+        Key::N => if ctrl_down { 0x0E } else { b'N' },
+        Key::O => if ctrl_down { 0x0F } else { b'O' },
+        Key::P => if ctrl_down { 0x10 } else { b'P' },
+        Key::Q => if ctrl_down { 0x11 } else { b'Q' },
+        Key::R => if ctrl_down { 0x12 } else { b'R' },
+        Key::S => if ctrl_down { 0x13 } else { b'S' },
+        Key::T => if ctrl_down { 0x14 } else { b'T' },
+        Key::U => if ctrl_down { 0x15 } else { b'U' },
+        Key::V => if ctrl_down { 0x16 } else { b'V' },
+        Key::W => if ctrl_down { 0x17 } else { b'W' },
+        Key::X => if ctrl_down { 0x18 } else { b'X' },
+        Key::Y => if ctrl_down { 0x19 } else { b'Y' },
+        Key::Z => if ctrl_down { 0x1A } else { b'Z' },
+        Key::Key0 => if shift_down { b')' } else { b'0' },
+        Key::Key1 => if shift_down { b'!' } else { b'1' },
+        Key::Key2 => if shift_down { b'@' } else { b'2' },
+        Key::Key3 => if shift_down { b'#' } else { b'3' },
+        Key::Key4 => if shift_down { b'$' } else { b'4' },
+        Key::Key5 => if shift_down { b'%' } else { b'5' },
+        Key::Key6 => if shift_down { b'^' } else { b'6' },
+        Key::Key7 => if shift_down { b'&' } else { b'7' },
+        Key::Key8 => if shift_down { b'*' } else { b'8' },
+        Key::Key9 => if shift_down { b'(' } else { b'9' },
+        Key::Minus => if shift_down { b'_' } else { b'-' },
+        Key::Equal => if shift_down { b'+' } else { b'=' },
+        Key::Comma => if shift_down { b'<' } else { b',' },
+        Key::Period => if shift_down { b'>' } else { b'.' },
+        Key::Slash => if shift_down { b'?' } else { b'/' },
+        Key::Semicolon => if shift_down { b':' } else { b';' },
+        Key::Apostrophe => if shift_down { b'"' } else { b'\'' },
+        Key::Space => b' ',
+        Key::Enter => 0x0D,
+        Key::Backspace => 0x08,
+        Key::Escape => 0x1B,
+        _ => 0,
+    }
+}
 
 mod config;
 use config::EmulatorConfig;
@@ -261,6 +343,10 @@ fn main() {
     // Limit to ~60 FPS
     window.set_target_fps(60);
 
+    // Guaranteed-delivery key events (see KeyEventRecorder doc comment).
+    let key_events: Rc<RefCell<VecDeque<(Key, bool)>>> = Rc::new(RefCell::new(VecDeque::new()));
+    window.set_input_callback(Box::new(KeyEventRecorder { events: key_events.clone() }));
+
     // Initialize the emulator core
     let mut machine = Apple2Machine::new();
     let mut video = Video::new();
@@ -412,6 +498,14 @@ fn main() {
     // Paste queue: clipboard text is fed to the latch one char at a time,
     // paced by the emulated program consuming the keyboard strobe.
     let mut key_queue: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
+    // Live-typing auto-repeat: holding a key down must re-strobe the latch at
+    // a fixed real-world rate, not once per main-loop iteration - the loop
+    // now iterates far faster than that during turbo/auto disk-turbo, which
+    // would otherwise auto-repeat unrealistically fast (or even look like
+    // held-down key spam if the CPU polls fast enough to see each rewrite).
+    const KEY_REPEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(67); // ~15 cps
+    let mut last_repeat_key: Option<Key> = None;
+    let mut last_repeat_time = Instant::now();
 
     let mut last_f1_down = false;
     let mut last_f2_down = false;
@@ -435,8 +529,7 @@ fn main() {
     let mut last_title_auto_disk_turbo = false;
 
     while window.is_open() && !window.is_key_down(Key::F10) {
-        // Handle Input (with OS auto-repeat, like a real keyboard)
-        let keys = window.get_keys_pressed(minifb::KeyRepeat::Yes);
+        // Handle Input
         let ctrl_down = window.is_key_down(Key::LeftCtrl) || window.is_key_down(Key::RightCtrl);
         let shift_down = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
         let joystick_x = joystick_axis(
@@ -454,61 +547,38 @@ fn main() {
             .mem
             .set_joystick_state(joystick_x, joystick_y, joystick_button_0, joystick_button_1);
 
-        for &key in keys.iter() {
-            let ascii = match key {
-                Key::A => if ctrl_down { 0x01 } else { b'A' },
-                Key::B => if ctrl_down { 0x02 } else { b'B' },
-                Key::C => if ctrl_down { 0x03 } else { b'C' },
-                Key::D => if ctrl_down { 0x04 } else { b'D' },
-                Key::E => if ctrl_down { 0x05 } else { b'E' },
-                Key::F => if ctrl_down { 0x06 } else { b'F' },
-                Key::G => if ctrl_down { 0x07 } else { b'G' },
-                Key::H => if ctrl_down { 0x08 } else { b'H' },
-                Key::I => if ctrl_down { 0x09 } else { b'I' },
-                Key::J => if ctrl_down { 0x0A } else { b'J' },
-                Key::K => if ctrl_down { 0x0B } else { b'K' },
-                Key::L => if ctrl_down { 0x0C } else { b'L' },
-                Key::M => if ctrl_down { 0x0D } else { b'M' },
-                Key::N => if ctrl_down { 0x0E } else { b'N' },
-                Key::O => if ctrl_down { 0x0F } else { b'O' },
-                Key::P => if ctrl_down { 0x10 } else { b'P' },
-                Key::Q => if ctrl_down { 0x11 } else { b'Q' },
-                Key::R => if ctrl_down { 0x12 } else { b'R' },
-                Key::S => if ctrl_down { 0x13 } else { b'S' },
-                Key::T => if ctrl_down { 0x14 } else { b'T' },
-                Key::U => if ctrl_down { 0x15 } else { b'U' },
-                Key::V => if ctrl_down { 0x16 } else { b'V' },
-                Key::W => if ctrl_down { 0x17 } else { b'W' },
-                Key::X => if ctrl_down { 0x18 } else { b'X' },
-                Key::Y => if ctrl_down { 0x19 } else { b'Y' },
-                Key::Z => if ctrl_down { 0x1A } else { b'Z' },
-                Key::Key0 => if shift_down { b')' } else { b'0' },
-                Key::Key1 => if shift_down { b'!' } else { b'1' },
-                Key::Key2 => if shift_down { b'@' } else { b'2' },
-                Key::Key3 => if shift_down { b'#' } else { b'3' },
-                Key::Key4 => if shift_down { b'$' } else { b'4' },
-                Key::Key5 => if shift_down { b'%' } else { b'5' },
-                Key::Key6 => if shift_down { b'^' } else { b'6' },
-                Key::Key7 => if shift_down { b'&' } else { b'7' },
-                Key::Key8 => if shift_down { b'*' } else { b'8' },
-                Key::Key9 => if shift_down { b'(' } else { b'9' },
-                Key::Minus => if shift_down { b'_' } else { b'-' },
-                Key::Equal => if shift_down { b'+' } else { b'=' },
-                Key::Comma => if shift_down { b'<' } else { b',' },
-                Key::Period => if shift_down { b'>' } else { b'.' },
-                Key::Slash => if shift_down { b'?' } else { b'/' },
-                Key::Semicolon => if shift_down { b':' } else { b';' },
-                Key::Apostrophe => if shift_down { b'"' } else { b'\'' },
-                Key::Space => b' ',
-                Key::Enter => 0x0D,
-                Key::Backspace => 0x08,
-                Key::Escape => 0x1B,
-                _ => 0,
-            };
-            if ascii != 0 {
+        // Guaranteed-delivery edges: these came from minifb's raw OS message
+        // callback (KeyEventRecorder), so unlike polling is_key_down, a key
+        // pressed and released entirely between two loop iterations is still
+        // captured here - it was recorded the instant Windows delivered the
+        // keydown/keyup message, not sampled from "what's down right now".
+        //
+        // Windows resends a down event repeatedly while a key is held (its
+        // own OS-level auto-repeat) with no up event in between, so "is this
+        // key still the one we're already tracking" is what distinguishes a
+        // held-key repeat (rate-limit it to KEY_REPEAT_INTERVAL, like real
+        // Apple II keyboard hardware) from a genuine new press or a real
+        // quick double-tap (register immediately - the up event in between
+        // cleared last_repeat_key).
+        for (key, is_down) in key_events.borrow_mut().drain(..) {
+            if !is_down {
+                if last_repeat_key == Some(key) {
+                    last_repeat_key = None;
+                }
+                continue;
+            }
+            let ascii = key_to_ascii(key, ctrl_down, shift_down);
+            if ascii == 0 {
+                continue;
+            }
+            let now = Instant::now();
+            let is_new_key = Some(key) != last_repeat_key;
+            if is_new_key || now.duration_since(last_repeat_time) >= KEY_REPEAT_INTERVAL {
                 // Live typing writes the latch directly, like real hardware:
                 // a new keypress overwrites the previous one even if unread.
                 machine.mem.keyboard_latch = 0x80 | ascii;
+                last_repeat_key = Some(key);
+                last_repeat_time = now;
             }
         }
 
