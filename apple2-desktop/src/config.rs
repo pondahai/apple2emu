@@ -7,6 +7,12 @@ pub struct EmulatorConfig {
     pub last_disk_path: Option<PathBuf>,
     #[serde(default = "default_volume")]
     pub volume: f32,
+    /// Index into main.rs's `speed_steps` array (F5 cycles through it).
+    #[serde(default)]
+    pub speed_index: usize,
+    /// Green-screen monochrome toggle (F7).
+    #[serde(default)]
+    pub mono: bool,
 }
 
 fn default_volume() -> f32 {
@@ -18,6 +24,8 @@ impl Default for EmulatorConfig {
         Self {
             last_disk_path: None,
             volume: default_volume(),
+            speed_index: 0,
+            mono: false,
         }
     }
 }

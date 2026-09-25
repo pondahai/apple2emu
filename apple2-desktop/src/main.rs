@@ -324,12 +324,12 @@ fn main() {
     // catch-up burst of emulated time (and audio) all at once afterwards.
     const MAX_OWED_SECS: f64 = 0.1;
     let speed_steps: [f32; 6] = [1.0, 1.2, 1.5, 2.0, 5.0, 0.0];
-    let mut speed_index: usize = 0;
 
     println!("Starting Apple II Emulator targeting Windows (minifb) and core no_std...");
 
     let mut config = EmulatorConfig::load();
     config.volume = config.volume.clamp(0.0, 1.0);
+    let mut speed_index: usize = if config.speed_index < speed_steps.len() { config.speed_index } else { 0 };
 
     // Create the Windows window
     let mut window = Window::new(
@@ -350,6 +350,7 @@ fn main() {
     // Initialize the emulator core
     let mut machine = Apple2Machine::new();
     let mut video = Video::new();
+    video.mono = config.mono;
 
     // Setup an audio stream
     let audio_device = OutputStream::try_default();
@@ -517,7 +518,7 @@ fn main() {
     let mut last_right_mouse_down = false;
     let mut clipboard = arboard::Clipboard::new().ok();
     
-    let mut speed_multiplier: f32 = 1.0;
+    let mut speed_multiplier: f32 = speed_steps[speed_index];
     let mut dc_filter_x1: f32 = 0.0;
     let mut dc_filter_y1: f32 = 0.0;
     let mut audio_mixer = AudioMixerState::new(machine.mem.speaker);
@@ -643,6 +644,8 @@ fn main() {
         if f5_down && !last_f5_down {
             speed_index = (speed_index + 1) % speed_steps.len();
             speed_multiplier = speed_steps[speed_index];
+            config.speed_index = speed_index;
+            config.save();
         }
         last_f5_down = f5_down;
 
@@ -650,6 +653,8 @@ fn main() {
         if f7_down && !last_f7_down {
             video.toggle_mono();
             println!(">>> Screen mode: {}", if video.mono { "Green (mono)" } else { "Color" });
+            config.mono = video.mono;
+            config.save();
         }
         last_f7_down = f7_down;
 
