@@ -1,93 +1,110 @@
 # Apple II Emulator in Rust
 
-A custom-built Apple II/II+ emulator written from scratch in Rust. It aims to accurately emulate the core components of the classic Apple II computer, focusing on low-level CPU operations, memory mapping, video generation, and Disk II controller logic.
+An Apple II+ emulator written from scratch in Rust: 6502 CPU, 48K RAM plus a 16K Language Card, text / lo-res / hi-res video, speaker audio, joystick, and a Disk II controller that boots and writes DOS 3.3 disks.
 
 ## Project Structure
 
-This emulator is split into a workspace with two main crates:
+The workspace has two crates:
 
-- **`apple2-core`**: The core library handling all hardware emulation. It is designed to be `no_std` compatible, allowing the core emulation logic to potentially run on embedded devices (like ESP32/RP2040) or WebAssembly without operating system dependencies.
-- **`apple2-desktop`**: The Windows/Desktop GUI frontend. It uses the `minifb` crate for high-performance cross-platform windowing, frame buffering, and input handling. It also uses `arboard` for clipboard support, and `rodio` for real-time audio playback.
+- **`apple2-core`**: all hardware emulation (CPU, memory map and soft switches, video rendering, Disk II, nibble encoding). It has no windowing or audio dependencies, but it is **not** `no_std` today: it still uses `std` for debug `println!` output and for the text-blink timer.
+- **`apple2-desktop`**: the Windows desktop frontend. It uses `minifb` for the window, framebuffer and keyboard, `rodio` for audio, `arboard` for the clipboard, `rfd` for file and message dialogs, and `directories` + `serde_json` for the settings file. It also contains a few diagnostic tools under `src/bin/`.
 
 ## Features
 
-### MOS 6502 CPU Emulation
-- Full implementation of the 6502 instruction set.
-- Accurate status flag logic (N, V, B, D, I, Z, C).
-- Stack pushes/pops and interrupt handling (BRK).
-- Trace logging for PC, Registers, and executing Code.
+### 6502 CPU
+- All documented NMOS 6502 instructions with cycle counts, including decimal (BCD) mode.
+- Undocumented opcodes as well (LAX, SAX, DCP, ISC, SLO, RLA, SRE, RRA, ANC, ALR, ARR, SBX, the unstable SHA/SHX/SHY/TAS/XAA group, and KIL/JAM, which halts the CPU until reset).
+- `BRK` vectors through `$FFFE`. There are no IRQ or NMI sources, because the emulated machine has no cards that would raise them.
 
-### Memory & Soft Switches (MMU)
-- Accurate memory map mimicking the Apple II architecture:
-  - `$0000` - `$BFFF`: 48KB Main RAM
-  - `$C000` - `$CFFF`: Hardware I/O and Soft Switches
-  - `$D000` - `$FFFF`: 12KB System ROM (Autostart & BASIC)
-- Emulation of memory-mapped keyboard registers (`$C000` data, `$C010` clear strobe).
-- Video soft switch intercepts (`$C050` - `$C057`) to toggle graphics modes and pages.
+### Memory Map & Soft Switches
+- `$0000`-`$BFFF`: 48K main RAM.
+- `$C000`-`$CFFF`: I/O space:
+  - keyboard: `$C000` data, `$C010` strobe clear
+  - speaker: `$C030`
+  - video switches: `$C050`-`$C057`
+  - pushbuttons: `$C061`/`$C062`
+  - paddles: `$C064`-`$C067`, with the `$C070` timer reset
+  - Language Card switches: `$C080`-`$C08F`
+  - Disk II: `$C0E0`-`$C0EF`, with the slot 6 boot ROM at `$C600`
+- `$D000`-`$FFFF`: 12K system ROM, or the **16K Language Card** RAM (two 4K banks at `$D000`, following the standard double-read write-enable protocol).
+- **Floating bus**: reads of undriven I/O locations return the byte the video scanner is currently fetching, as on real hardware.
 
-### Video & Graphics
-- **Text Mode**: 40x24 monochrome text rendering using the original Apple II Character ROM. Supports Inverse and Flashing (blinking) text attributes.
-- **Lo-Res Graphics (`GR`)**: 40x48 pixel rendering utilizing the authentic 15-color Apple II palette.
-- **Hi-Res Graphics (`HGR`)**: 280x192 bitmapped rendering. Implements NTSC artifact color approximation, correctly decoding green, purple, blue, orange, black, and white based on the odd/even column placement and the bit 7 shift palette.
+### Video
+- **Text**: 40x24 characters drawn with the original character ROM, including inverse and flashing characters.
+- **Lo-res** (`GR`): 40x48 blocks in the 16-color palette.
+- **Hi-res** (`HGR`): 280x192 with NTSC artifact colors (black, white, green, purple, orange, blue), chosen from each pixel's column parity and bit 7 of its byte.
+- **Mixed mode** (4 lines of text below the graphics) and **page 1/2** switching.
+- **`F7`** toggles a green monochrome-monitor look.
 
-### Keyboard & Input
-- Robust queue-based key delivery preventing dropped keystrokes.
-- **Control Key Modifier**: Supports Apple II specific control sequences (like `Ctrl+B` to drop into BASIC from the Monitor).
-- **Shift Key Modifier**: Translates symbols (e.g., `!`, `@`, `#`) correctly.
-- **Clipboard Paste**: Press `Ctrl+V` to inject text directly from the host OS clipboard into the Apple II keyboard stream. Converts lowercase to uppercase automatically and maps newlines to Apple II Return (0x0D), allowing you to paste entire blocks of BASIC code instantly.
+### Keyboard, Paste & Joystick
+- Key presses are captured from the OS event stream, so a quick tap between two frames is never lost. A held key auto-repeats at about 15 characters per second.
+- Letters are always sent as uppercase. `Ctrl`+letter sends control codes (for example `Ctrl+B` for BASIC from the Monitor). `Shift`+digit and `Shift`+punctuation send the shifted symbols. `Enter` sends Return, `Backspace` sends ← (`Ctrl+H`) and `Esc` sends Escape.
+- **Paste**: **click the right mouse button** to type the host clipboard into the Apple II. Lowercase is converted to uppercase and newlines to Return, and characters are fed only as fast as the program reads the keyboard, so long BASIC listings paste reliably.
+- **Joystick**: the arrow keys drive paddles 0/1 (X/Y). They act only as the joystick, not as keyboard keys. **`Right Alt` is pushbutton 0** and **`Left Alt` is pushbutton 1**.
 
-### Audio Emulation
-- Toggles the speaker state precisely via the `$C030` memory-mapped I/O port.
-- Tracks exact cycle counts between toggles to generate cycle-accurate audio in real-time.
-- Employs a custom High-pass filter (DC Blocker) to quickly decay continuous voltage when the speaker is idle, eliminating annoying continuous pop/crack sounds.
-- Runs at a robust 22,050 Hz sample rate with fractional CPU cycle phase-tracking across audio frames for smoother beep generation. 
-- Implements automated audio buffer padding to prevent chopped audio playback during heavy CPU or rendering loads.
+### Audio
+- Speaker clicks (`$C030`) are timestamped to the exact CPU cycle and mixed into 44.1 kHz audio, followed by a DC-blocking high-pass filter so an idle speaker makes no pop or hum.
+- Audio playback is paced to real time. If playback falls behind (a stall, or disk auto turbo), the stale backlog is dropped instead of playing late. At a fixed turbo speed, audio is pitch-shifted to match the emulation speed.
+- **`F8` / `F9`**: volume down / up in 10% steps. The window title shows `[VOL n%]` or `[MUTED]`.
 
 ### Disk II Controller (Slot 6)
-- Custom state machine emulating the Disk II sequencer.
-- Accurate quarter-track magnetic phase stepper motor emulation.
-- Cycle-accurate rotational delays (~32 CPU cycles per byte) satisfying the tight timing loops of the DOS 3.3 RWTS routines.
-- Read sequencing and GCR (6-and-2 / 4-and-4) decoding capable of fully booting DOS 3.3 raw `.dsk` images into Applesoft BASIC.
-- Write sequencing supports DOS `SAVE` flow and any write operations to the disk.
-- **Disk Write-Back (Save)**: Any changes written to the disk are automatically saved back to the `.dsk` or `.gz` file when the disk is ejected (`F3`), upon emulator reboot (`F2`), or when closing the application.
-- **Automatic Disk Turbo**: whenever the Disk II motor is spinning, the desktop frontend temporarily removes frame throttling to speed up disk reads and seeks; when the motor stops, speed returns to the current manual `F4` setting.
-- **Dynamic Disk Loading**: Press `F3` to open a file selection dialog. Supports standard `.dsk`, `.do`, `.po` images and Gzip compressed `.gz` images.
+- Bit-level read/write shift register timed at 4 CPU cycles per bit (32 per byte).
+- Four-phase stepper motor with quarter-track head positioning, a 1-second motor-off delay and spin-up time.
+- Disk images are converted to a nibble stream (DOS 3.3 sector interleave, 4-and-4 address fields, 6-and-2 data fields) and converted back when saving, so DOS 3.3 `SAVE`, `INIT` and other writes work.
+- **Supported images**: 143,360-byte **DOS-order** images (`.dsk` / `.do`), optionally gzip-compressed (`.gz`, detected by content). ProDOS-order (`.po`) and `.nib` / `.woz` images are **not** supported.
+- **Automatic disk turbo**: while the drive motor is on, emulation runs unthrottled to speed up loading, then returns to the selected `F5` speed.
+- **Write-back**: a modified disk is saved back to its file (re-compressed if it is `.gz`) when you cold reboot with `F2`, when you quit, and when you swap disks with `F3`. The `F3` save applies only if the current disk was itself opened with `F3`.
+
+### Memory Monitor (`F6`)
+- Pauses emulation and opens an **on-screen 80-column hex viewer** over the whole 64K address space.
+- It opens **read-only**:
+  - Move with the arrow keys, `PgUp` / `PgDn` and `Home` / `End`.
+  - Press `G` to go to an address.
+  - Press **`Enter`** to switch to edit mode, where typing hex digits overwrites bytes. Press `Enter` or `Esc` to return to viewing.
+  - Press `Esc` or `F6` to resume emulation.
+- While paused, the **console window** also accepts Apple II Monitor-style commands: `300` (examine), `300.3FF` (dump), `300:A9 00 60` (store), `:EA` (continue storing), `?` (help) and `Q` (resume).
+- Reading memory here never triggers soft switches. I/O space (`$C000`-`$CFFF`) cannot be edited, and writes to `$D000`-`$FFFF` go into the currently selected Language Card bank.
+
+### Settings
+The last disk path, volume, speed step and color/green mode are saved to `config.json` in the per-user config folder (on Windows, `%APPDATA%\Apple2Emu\Apple2Emu\config\`) and restored at the next launch.
 
 ## Requirements
 
-To build and run this emulator, you need:
+1. **Rust toolchain**: install it with [rustup.rs](https://rustup.rs/).
+2. **ROM files** in the `roms/` folder. See `SETUP.md` for where to get them:
+   - `APPLE2PLUS.ROM`: 12K Apple II+ system ROM (`$D000`-`$FFFF`). **Required**: the emulator exits with an error dialog if it is missing.
+   - `DISK2.ROM`: 256-byte Disk II boot ROM (P5, 341-0027). Without it, floppies cannot boot.
+   - `Apple II plus Video ROM - 341-0036 - Rev. 7.bin`: 2K character ROM. Without it, text is drawn as a checkerboard.
+3. **Boot disk**: `roms/MASTER.DSK` (a DOS 3.3 image). It is used only when no previously loaded disk is remembered in the settings.
 
-1. **Rust Toolchain**: Install via [rustup.rs](https://rustup.rs/).
-2. **Apple II ROM Files** — place all in the `roms/` folder (see `SETUP.md` for sources):
-   - `APPLE2PLUS.ROM` (12KB — Apple II+ Motherboard ROM)
-   - `Apple II plus Video ROM - 341-0036 - Rev. 7.bin` (2KB — Character ROM)
-   - `DISK2.ROM` (256 bytes — Official Disk II Controller ROM, P5A / 341-0027)
-   - `DISK2_P6.ROM` (256 bytes — Official State Machine ROM, 341-0028 - reserved for future use)
-3. **DOS 3.3 Disk Image**: `MASTER.DSK` (140KB) — place in `roms/MASTER.DSK`
-
-All paths are **relative** (`../roms/...`) — no hardcoded absolute paths needed.
-See `SETUP.md` for full instructions on where to get each file.
+Missing optional files are listed in a single warning dialog at startup. The `roms/` folder is looked up next to the build output (`target/<profile>/../../roms`), then in `./roms`, then in `../roms`.
 
 ## Building and Running
 
-Ensure your terminal is in the project's root workspace folder, then run:
+From the workspace root:
 
 ```bash
 cargo run --bin apple2-desktop
 ```
 
-### Hotkeys & Basic Usage
+### Hotkeys
 
-- **`F2`**: **Reboot**. Restarts the emulator and performs a clean boot from disk (simulates a power-on).
-- **`Ctrl + Delete`**: **System Reset**. Simulates the physical `Reset` key on an Apple II (warm reset).
-- **`F3`**: **Load Disk Image**. Opens a system file dialog to choose a `.dsk` or `.gz` disk image.
-- **`F4`**: **Speed Cycle**. Cycles CPU speed through **1x → 2x → 3x → 4x → 5x → 1x** and relaxes frame/audio/debug overhead when above 1x.
-- **Disk Motor Auto Turbo**: While the Disk II motor is on, the window title shows **`AUTO TURBO UNTHROTTLED`** and the frontend runs unthrottled. When the motor stops, it falls back to the current `F4` speed mode.
-- **`F6`**: **Memory Monitor**. Pauses emulation and opens an on-screen hex editor over the whole 64K address space: arrow keys / PgUp / PgDn / Home / End to move, `G` to go to an address, `Esc` or `F6` to resume. It opens read-only; press `Enter` to enter edit mode (type hex digits to overwrite bytes) and `Enter`/`Esc` to go back to viewing. The same pause also accepts Apple II-style commands in the console window (`300` examine, `300.3FF` dump, `300:A9 00 60` store, `:EA` continue, `Q` resume). Reads never trigger soft switches; I/O space ($C000-$CFFF) is read-only and writes to $D000-$FFFF go into the current Language Card bank.
-- **Joystick**: Arrow keys drive Paddle 0/1 (X/Y). `Left Alt` maps to Pushbutton 0, `Right Alt` maps to Pushbutton 1.
-- **`Ctrl + V`**: **Paste Text**. Inject text from your host clipboard directly into the Apple II keyboard stream.
-- **Monitor**: To enter the Monitor manually from BASIC, type `CALL -151`.
-- **BASIC**: To enter AppleSoft BASIC from the Monitor (`*`), type `Ctrl+B` and press `Enter`.
+| Key | Function |
+|---|---|
+| `F1` | Warm reset (like Ctrl-Reset: resets only the CPU, and RAM and the disk stay as they are) |
+| `F2` | Cold reboot: saves a modified disk, clears the machine and boots again. `Ctrl+F2` does a warm reset instead |
+| `F3` | Load a disk image (file dialog filters `.dsk` / `.gz`) |
+| `F5` | Cycle speed: **1x → 1.2x → 1.5x → 2x → 5x → unthrottled → 1x** (shown in the window title) |
+| `F6` | Memory monitor (see above) |
+| `F7` | Toggle color / green monochrome |
+| `F8` / `F9` | Volume down / up |
+| `F10` | Quit (closing the window also works). A modified disk is saved first |
+| Right mouse button | Paste the clipboard as keystrokes |
+| Arrow keys, `Right Alt` / `Left Alt` | Joystick, pushbutton 0 / pushbutton 1 |
+
+`F4` is currently unused.
+
+From BASIC, `CALL -151` enters the built-in Apple II Monitor. From the Monitor (`*`), `Ctrl+B` then `Enter` returns to Applesoft BASIC.
 
 ## License
 Created as an experimental Rust emulation project.
