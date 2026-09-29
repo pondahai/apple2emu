@@ -212,8 +212,9 @@ free up F6/F7 for other things:
 | F2 | Cold reboot (reloads ROM/disk state); Ctrl+F2 does a warm reset too |
 | F3 | Load another disk image |
 | F5 | Cycle emulation speed (1x/1.2x/1.5x/2x/5x/unthrottled) |
+| F6 | Pause and open the on-screen memory monitor (read-only by default: arrows move, `G` goto, Enter toggles edit mode where hex digits overwrite bytes, Esc/F6 resume); the console also accepts `300.3FF` / `300:A9 00` commands while paused |
 | F7 | Toggle color / green-screen monochrome display |
 | F8 / F9 | Volume down / up (PicoApple2 uses F6/F7 for this instead) |
 | F10 | Quit |
 
-F4 and F6 are currently unbound.
+F4 is currently unbound.

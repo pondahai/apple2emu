@@ -90,6 +90,9 @@ fn key_to_ascii(key: Key, ctrl_down: bool, shift_down: bool) -> u8 {
 }
 
 mod config;
+mod mem_view;
+mod monitor;
+mod overlay;
 use config::EmulatorConfig;
 
 struct AudioMixerState {
@@ -512,7 +515,12 @@ fn main() {
     let mut last_f2_down = false;
     let mut last_f3_down = false;
     let mut last_f5_down = false;
+    let mut last_f6_down = false;
     let mut last_f7_down = false;
+    let mut mem_monitor = monitor::Monitor::new();
+    let mut monitor_paused = false;
+    let mut osd = overlay::Overlay::new();
+    let monitor_lines = monitor::spawn_stdin_reader();
     let mut last_f8_down = false;
     let mut last_f9_down = false;
     let mut last_right_mouse_down = false;
@@ -530,6 +538,52 @@ fn main() {
     let mut last_title_auto_disk_turbo = false;
 
     while window.is_open() && !window.is_key_down(Key::F10) {
+        // While the monitor is open, keep pumping window events (so F6 can
+        // resume and the window stays responsive) but run no emulation.
+        if monitor_paused {
+            let shift = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
+            let mut resume = false;
+            let pressed: Vec<Key> = key_events.borrow_mut().drain(..).filter(|&(_, down)| down).map(|(k, _)| k).collect();
+            for key in pressed {
+                if osd.handle_key(key, shift, &mut machine.mem) {
+                    resume = true;
+                    break;
+                }
+            }
+            while let Ok(line) = monitor_lines.try_recv() {
+                if let monitor::Outcome::Quit = mem_monitor.handle_line(&line, &mut machine.mem) {
+                    resume = true;
+                    break;
+                }
+            }
+            if resume {
+                mem_monitor.leave();
+                osd.close();
+                monitor_paused = false;
+                // Everything time-based must be re-anchored or it would try to
+                // "catch up" the pause.
+                key_events.borrow_mut().clear();
+                last_repeat_key = None;
+                sink = rebuild_sink(audio_handle.as_ref(), config.volume);
+                audio_mixer.reset_at(machine.total_cycles as f64, cycles_per_sample, machine.mem.speaker);
+                dc_filter_x1 = 0.0;
+                dc_filter_y1 = 0.0;
+                last_cycle = Instant::now();
+            }
+            if monitor_paused {
+                // Re-render the Apple screen too, so edits to video memory
+                // show up behind the overlay immediately.
+                if machine.mem.text_mode { video.render_text_frame(&machine.mem, &char_rom); }
+                else if machine.mem.hires_mode { video.render_hires_frame(&machine.mem, &char_rom); }
+                else { video.render_lores_frame(&machine.mem, &char_rom); }
+                let composed = osd.render(&video.frame_buffer, &machine.mem, &char_rom);
+                window.update_with_buffer(composed, overlay::WIDTH, overlay::HEIGHT).unwrap();
+                // The FPS limiter may be off (unthrottled speed); don't spin.
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
+            continue;
+        }
+
         // Handle Input
         let ctrl_down = window.is_key_down(Key::LeftCtrl) || window.is_key_down(Key::RightCtrl);
         let shift_down = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
@@ -648,6 +702,20 @@ fn main() {
             config.save();
         }
         last_f5_down = f5_down;
+
+        // F6: pause and open the console memory monitor.
+        let f6_down = window.is_key_down(Key::F6);
+        if f6_down && !last_f6_down {
+            if let Some(s) = &sink {
+                s.pause();
+            }
+            while monitor_lines.try_recv().is_ok() {} // drop anything typed before pausing
+            key_events.borrow_mut().clear();
+            mem_monitor.enter();
+            osd.open(Box::new(mem_view::MemView::new(0x0000)));
+            monitor_paused = true;
+        }
+        last_f6_down = f6_down;
 
         let f7_down = window.is_key_down(Key::F7);
         if f7_down && !last_f7_down {

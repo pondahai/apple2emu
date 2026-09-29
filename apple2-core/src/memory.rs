@@ -133,6 +133,48 @@ impl Apple2Memory {
         core::mem::take(&mut self.speaker_toggle_cycles)
     }
 
+    /// Index into `lc_ram` for $D000-$FFFF under the currently selected bank.
+    fn lc_index(&self, addr: u16) -> usize {
+        if addr < 0xE000 {
+            (addr - 0xD000) as usize + if self.lc_bank2 { 0x1000 } else { 0 }
+        } else {
+            (addr - 0xE000 + 0x2000) as usize
+        }
+    }
+
+    /// Debugger read: the byte the CPU would currently see at `addr`, without
+    /// triggering soft switches or recording a bus cycle. I/O locations with
+    /// no static value (soft switches, floating bus, Disk II latches) return
+    /// `None`, since reading them for real would change machine state.
+    pub fn peek(&self, addr: u16) -> Option<u8> {
+        match addr {
+            0x0000..=0xBFFF => Some(self.ram[addr as usize]),
+            0xC000..=0xC00F => Some(self.keyboard_latch),
+            0xC600..=0xC6FF => Some(self.disk2.rom[(addr - 0xC600) as usize]),
+            0xC000..=0xCFFF => None,
+            0xD000..=0xFFFF => Some(if self.lc_read_enable {
+                self.lc_ram[self.lc_index(addr)]
+            } else {
+                self.rom[(addr - 0xD000) as usize]
+            }),
+        }
+    }
+
+    /// Debugger write. RAM writes directly; $D000-$FFFF writes into the
+    /// currently selected Language Card bank regardless of LC write-protect.
+    /// I/O space is rejected (returns false) so poking never flips switches.
+    pub fn poke(&mut self, addr: u16, data: u8) -> bool {
+        match addr {
+            0x0000..=0xBFFF => self.ram[addr as usize] = data,
+            0xC000..=0xCFFF => return false,
+            0xD000..=0xFFFF => {
+                let i = self.lc_index(addr);
+                self.lc_ram[i] = data;
+            }
+        }
+        true
+    }
+
     pub fn set_joystick_state(&mut self, x: u8, y: u8, button0: bool, button1: bool) {
         self.paddles[0] = x;
         self.paddles[1] = y;

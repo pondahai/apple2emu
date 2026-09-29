@@ -256,4 +256,43 @@ mod tests {
         mem.end_cpu_step();
         assert_eq!(low, 0x00);
     }
+
+    #[test]
+    fn peek_has_no_side_effects() {
+        let mut mem = Apple2Memory::new();
+        mem.ram[0x300] = 0xA9;
+        mem.keyboard_latch = 0xC1;
+        assert_eq!(mem.peek(0x0300), Some(0xA9));
+        assert_eq!(mem.peek(0xC010), None);
+        assert_eq!(mem.peek(0xC030), None);
+        assert_eq!(mem.peek(0xC000), Some(0xC1));
+        assert_eq!(mem.keyboard_latch, 0xC1);
+        assert!(!mem.speaker);
+        assert!(mem.take_speaker_toggle_cycles().is_empty());
+    }
+
+    #[test]
+    fn poke_writes_current_lc_bank_even_when_write_protected() {
+        let mut mem = Apple2Memory::new();
+        mem.lc_read_enable = true;
+        mem.lc_write_enable = false;
+        mem.lc_bank2 = true;
+        assert!(mem.poke(0xD000, 0x42));
+        assert_eq!(mem.lc_ram[0x1000], 0x42);
+        assert_eq!(mem.lc_ram[0x0000], 0x00);
+        assert_eq!(mem.peek(0xD000), Some(0x42));
+        mem.lc_bank2 = false;
+        assert_eq!(mem.peek(0xD000), Some(0x00));
+        assert!(mem.poke(0xFFFC, 0x11));
+        assert_eq!(mem.lc_ram[0x3FFC], 0x11);
+    }
+
+    #[test]
+    fn poke_rejects_io_space() {
+        let mut mem = Apple2Memory::new();
+        assert!(!mem.poke(0xC050, 0x00));
+        assert!(mem.text_mode);
+        assert!(mem.poke(0x0400, 0xC1));
+        assert_eq!(mem.ram[0x400], 0xC1);
+    }
 }

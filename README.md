@@ -83,6 +83,7 @@ cargo run --bin apple2-desktop
 - **`F3`**: **Load Disk Image**. Opens a system file dialog to choose a `.dsk` or `.gz` disk image.
 - **`F4`**: **Speed Cycle**. Cycles CPU speed through **1x → 2x → 3x → 4x → 5x → 1x** and relaxes frame/audio/debug overhead when above 1x.
 - **Disk Motor Auto Turbo**: While the Disk II motor is on, the window title shows **`AUTO TURBO UNTHROTTLED`** and the frontend runs unthrottled. When the motor stops, it falls back to the current `F4` speed mode.
+- **`F6`**: **Memory Monitor**. Pauses emulation and opens an on-screen hex editor over the whole 64K address space: arrow keys / PgUp / PgDn / Home / End to move, `G` to go to an address, `Esc` or `F6` to resume. It opens read-only; press `Enter` to enter edit mode (type hex digits to overwrite bytes) and `Enter`/`Esc` to go back to viewing. The same pause also accepts Apple II-style commands in the console window (`300` examine, `300.3FF` dump, `300:A9 00 60` store, `:EA` continue, `Q` resume). Reads never trigger soft switches; I/O space ($C000-$CFFF) is read-only and writes to $D000-$FFFF go into the current Language Card bank.
 - **Joystick**: Arrow keys drive Paddle 0/1 (X/Y). `Left Alt` maps to Pushbutton 0, `Right Alt` maps to Pushbutton 1.
 - **`Ctrl + V`**: **Paste Text**. Inject text from your host clipboard directly into the Apple II keyboard stream.
 - **Monitor**: To enter the Monitor manually from BASIC, type `CALL -151`.
